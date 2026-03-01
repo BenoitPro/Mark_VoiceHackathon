@@ -21,7 +21,8 @@ export class ElevenLabsService {
     const streamId = `tts-${Date.now()}`;
 
     if (!this.env.elevenLabsApiKey) {
-      return streamId;
+      this.lastProviderErrorAt = new Date().toISOString();
+      throw new Error("ELEVENLABS_API_KEY missing for TTS fallback.");
     }
 
     const response = await fetch(`${this.baseUrl}/text-to-speech/${this.env.elevenLabsVoiceId}/stream`, {

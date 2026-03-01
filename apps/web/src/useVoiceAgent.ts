@@ -19,6 +19,7 @@ import {
   type TranscriptEvent,
   type TtsAudioChunkEvent,
   type TtsAudioEndEvent,
+  type TtsProvider,
   type VoiceState
 } from "@mark/contracts";
 
@@ -29,6 +30,11 @@ import { StreamingTtsPlayer } from "./ttsPlayer";
 type VoiceHealth = {
   sttConfigured: boolean;
   ttsConfigured: boolean;
+  ttsProviders?: {
+    speechmaticsConfigured: boolean;
+    elevenLabsConfigured: boolean;
+    priority: Array<"speechmatics" | "elevenlabs">;
+  };
   llmConfigured: boolean;
   authConfigured: boolean;
   composioConfigured: boolean;
@@ -61,6 +67,7 @@ type VoiceAgentState = {
   pendingAction: ActionDraft | null;
   actionStatus: ActionStatusEvent | null;
   actionTimeline: ActionTimelineItem[];
+  activeTtsProvider: TtsProvider | null;
 };
 
 type VoiceAgentApi = VoiceAgentState & {
@@ -94,6 +101,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
   const [pendingAction, setPendingAction] = useState<ActionDraft | null>(null);
   const [actionStatus, setActionStatus] = useState<ActionStatusEvent | null>(null);
   const [actionTimeline, setActionTimeline] = useState<ActionTimelineItem[]>([]);
+  const [activeTtsProvider, setActiveTtsProvider] = useState<TtsProvider | null>(null);
 
   const socketRef = useRef<Socket | null>(null);
   const micRef = useRef<MicrophonePipeline | null>(null);
@@ -195,6 +203,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
       setConnected(false);
       setVoiceStateSafe("idle");
       setSessionId(null);
+      setActiveTtsProvider(null);
     });
 
     socket.on("connect_error", (err) => {
@@ -249,10 +258,12 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     });
 
     socket.on(WS_EVENTS.TTS_AUDIO_CHUNK, (payload: TtsAudioChunkEvent) => {
-      playerRef.current?.enqueueChunk(payload.streamId, payload.chunkBase64);
+      setActiveTtsProvider(payload.provider);
+      playerRef.current?.enqueueChunk(payload.streamId, payload.chunkBase64, payload.contentType);
     });
 
     socket.on(WS_EVENTS.TTS_AUDIO_END, (payload: TtsAudioEndEvent) => {
+      setActiveTtsProvider(payload.provider);
       playerRef.current?.endStream(payload.streamId);
     });
 
@@ -407,6 +418,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     }
 
     playerRef.current?.stop();
+    setActiveTtsProvider(null);
     disconnectSocket();
     setVoiceStateSafe("idle");
   };
@@ -419,6 +431,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     setUserFinal("");
     setPendingAction(null);
     setActionStatus(null);
+    setActiveTtsProvider(null);
   };
 
   const approvePending = (): void => {
@@ -483,6 +496,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
       pendingAction,
       actionStatus,
       actionTimeline,
+      activeTtsProvider,
       start,
       stop,
       resetMemory,
@@ -504,7 +518,8 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
       isRunning,
       pendingAction,
       actionStatus,
-      actionTimeline
+      actionTimeline,
+      activeTtsProvider
     ]
   );
 }

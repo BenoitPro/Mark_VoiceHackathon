@@ -28,6 +28,7 @@ export type AgentToolDefinition = {
   toolkitSlug: string | null;
   inputSchema: Record<string, unknown>;
   connectedAccountId: string | null;
+  connectedAccountIds: string[];
   isMutating: boolean;
 };
 
@@ -59,9 +60,20 @@ export class ComposioService {
 
     const response = await this.client.authConfigs.list();
     const items = asArray((response as { items?: unknown[] }).items);
-
-    return items
+    const authConfigCatalog = items
       .map((item) => asCatalogItem(item))
+      .filter((item): item is ComposioCatalogItem => item !== null)
+      .sort((a, b) => a.toolkitName.localeCompare(b.toolkitName));
+
+    if (authConfigCatalog.length > 0) {
+      return authConfigCatalog;
+    }
+
+    // Fallback: workspace may rely on managed toolkit authorization without explicit auth configs.
+    const toolkitsResponse = await (this.client.toolkits as any).getToolkits({ limit: 400 });
+    const toolkitItems = asArray(toolkitsResponse);
+    return toolkitItems
+      .map((item) => asToolkitCatalogItem(item))
       .filter((item): item is ComposioCatalogItem => item !== null)
       .sort((a, b) => a.toolkitName.localeCompare(b.toolkitName));
   }
@@ -72,6 +84,24 @@ export class ComposioService {
   ): Promise<{ redirectUrl: string; connectionRequestId: string }> {
     if (!this.client) {
       throw new Error("Composio is not configured.");
+    }
+
+    if (authConfigId.startsWith("toolkit:")) {
+      const toolkitSlug = authConfigId.slice("toolkit:".length).trim();
+      if (!toolkitSlug) {
+        throw new Error("Invalid toolkit connection identifier.");
+      }
+
+      const toolkitRequest = await this.client.toolkits.authorize(composioUserId, toolkitSlug);
+      const toolkitRedirectUrl = readStringValue(toolkitRequest, "redirectUrl");
+      if (!toolkitRedirectUrl) {
+        throw new Error("Composio toolkit authorization did not return a redirect URL.");
+      }
+
+      return {
+        redirectUrl: toolkitRedirectUrl,
+        connectionRequestId: readStringValue(toolkitRequest, "id") ?? randomUUID()
+      };
     }
 
     const request = await this.client.connectedAccounts.link(composioUserId, authConfigId, {
@@ -116,14 +146,16 @@ export class ComposioService {
     }
 
     const connections = await this.listConnections(composioUserId);
-    const activeByToolkit = new Map<string, string>();
+    const activeByToolkit = new Map<string, string[]>();
     for (const connection of connections) {
       if (connection.status.toUpperCase() !== "ACTIVE") {
         continue;
       }
-      if (!activeByToolkit.has(connection.toolkitSlug)) {
-        activeByToolkit.set(connection.toolkitSlug, connection.connectedAccountId);
+      const existing = activeByToolkit.get(connection.toolkitSlug) ?? [];
+      if (!existing.includes(connection.connectedAccountId)) {
+        existing.push(connection.connectedAccountId);
       }
+      activeByToolkit.set(connection.toolkitSlug, existing);
     }
 
     const toolkitSlugs = Array.from(activeByToolkit.keys());
@@ -147,7 +179,8 @@ export class ComposioService {
         description: tool.description ?? `${tool.name}.`,
         toolkitSlug: tool.toolkit?.slug ?? null,
         inputSchema: ensureSchema(tool.inputParameters),
-        connectedAccountId: tool.toolkit?.slug ? activeByToolkit.get(tool.toolkit.slug) ?? null : null,
+        connectedAccountId: tool.toolkit?.slug ? (activeByToolkit.get(tool.toolkit.slug) ?? [])[0] ?? null : null,
+        connectedAccountIds: tool.toolkit?.slug ? activeByToolkit.get(tool.toolkit.slug) ?? [] : [],
         isMutating: classifyToolMutability(tool)
       };
     }
@@ -164,9 +197,38 @@ export class ComposioService {
       throw new Error("Composio is not configured.");
     }
 
-    return this.client.tools.execute(tool.toolSlug, {
+    const candidateAccountIds = dedupeConnectedAccountIds(tool.connectedAccountId, tool.connectedAccountIds);
+
+    if (candidateAccountIds.length <= 1 || tool.isMutating) {
+      return this.runExecute(tool.toolSlug, composioUserId, candidateAccountIds[0] ?? null, args);
+    }
+
+    let lastError: unknown = null;
+    for (const connectedAccountId of candidateAccountIds) {
+      try {
+        return await this.runExecute(tool.toolSlug, composioUserId, connectedAccountId, args);
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    const fallbackMessage = toErrorMessage(lastError);
+    throw new Error(`Tool ${tool.toolSlug} failed for all connected accounts: ${fallbackMessage}`);
+  }
+
+  private async runExecute(
+    toolSlug: string,
+    composioUserId: string,
+    connectedAccountId: string | null,
+    args: Record<string, unknown>
+  ): Promise<unknown> {
+    if (!this.client) {
+      throw new Error("Composio is not configured.");
+    }
+
+    return this.client.tools.execute(toolSlug, {
       userId: composioUserId,
-      connectedAccountId: tool.connectedAccountId ?? undefined,
+      connectedAccountId: connectedAccountId ?? undefined,
       arguments: args,
       dangerouslySkipVersionCheck: true
     });
@@ -216,6 +278,13 @@ function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((entry): entry is string => typeof entry === "string");
+}
+
 function asCatalogItem(raw: unknown): ComposioCatalogItem | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -224,10 +293,10 @@ function asCatalogItem(raw: unknown): ComposioCatalogItem | null {
   const toolkit = readObject(item, "toolkit");
   const authConfigId = readStringValue(item, "id");
   const toolkitSlug = readStringValue(toolkit, "slug");
-  const toolkitName = readStringValue(toolkit, "name");
-  if (!authConfigId || !toolkitSlug || !toolkitName) {
+  if (!authConfigId || !toolkitSlug) {
     return null;
   }
+  const toolkitName = readStringValue(toolkit, "name") ?? humanizeToolkitSlug(toolkitSlug);
 
   return {
     authConfigId,
@@ -239,6 +308,32 @@ function asCatalogItem(raw: unknown): ComposioCatalogItem | null {
   };
 }
 
+function asToolkitCatalogItem(raw: unknown): ComposioCatalogItem | null {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const item = raw as Record<string, unknown>;
+  const toolkitSlug = readStringValue(item, "slug");
+  const toolkitName = readStringValue(item, "name");
+  const noAuth = readBooleanValue(item, "noAuth");
+  if (!toolkitSlug || !toolkitName || noAuth) {
+    return null;
+  }
+
+  const composioManagedSchemes = asStringArray(item.composioManagedAuthSchemes);
+  const authSchemes = asStringArray(item.authSchemes);
+  const scheme = composioManagedSchemes[0] ?? authSchemes[0] ?? null;
+
+  return {
+    authConfigId: `toolkit:${toolkitSlug}`,
+    name: `${toolkitName} Managed Connection`,
+    toolkitSlug,
+    toolkitName,
+    authScheme: scheme,
+    isComposioManaged: true
+  };
+}
+
 function asConnection(raw: unknown): ComposioConnection | null {
   if (!raw || typeof raw !== "object") {
     return null;
@@ -246,22 +341,31 @@ function asConnection(raw: unknown): ComposioConnection | null {
   const item = raw as Record<string, unknown>;
   const toolkit = readObject(item, "toolkit");
   const authConfig = readObject(item, "authConfig");
+  const data = readObject(item, "data");
+  const state = readObject(item, "state");
+  const stateValue = readObject(state, "val");
   const connectedAccountId =
     readStringValue(item, "id") ?? readStringValue(item, "nanoid") ?? readStringValue(item, "connectedAccountId");
   const toolkitSlug = readStringValue(toolkit, "slug");
-  const toolkitName = readStringValue(toolkit, "name");
+  const toolkitName = readStringValue(toolkit, "name") ?? (toolkitSlug ? humanizeToolkitSlug(toolkitSlug) : null);
 
   if (!connectedAccountId || !toolkitSlug || !toolkitName) {
     return null;
   }
 
+  const status =
+    readStringValue(item, "status") ??
+    readStringValue(data, "status") ??
+    readStringValue(stateValue, "status") ??
+    "UNKNOWN";
+
   return {
     connectedAccountId,
-    authConfigId: readStringValue(authConfig, "id"),
+    authConfigId: readStringValue(authConfig, "id") ?? readStringValue(item, "authConfigId"),
     authConfigName: readStringValue(authConfig, "name"),
     toolkitSlug,
     toolkitName,
-    status: readStringValue(item, "status") ?? "UNKNOWN"
+    status
   };
 }
 
@@ -287,4 +391,32 @@ function readBooleanValue(source: unknown, key: string): boolean | null {
   }
   const value = (source as Record<string, unknown>)[key];
   return typeof value === "boolean" ? value : null;
+}
+
+function humanizeToolkitSlug(slug: string): string {
+  return slug
+    .split(/[_-]+/)
+    .filter((part) => part.length > 0)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function dedupeConnectedAccountIds(primary: string | null, extra: string[]): string[] {
+  const unique = new Set<string>();
+  if (primary) {
+    unique.add(primary);
+  }
+  for (const connectedAccountId of extra) {
+    if (connectedAccountId && connectedAccountId.length > 0) {
+      unique.add(connectedAccountId);
+    }
+  }
+  return Array.from(unique);
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error);
 }

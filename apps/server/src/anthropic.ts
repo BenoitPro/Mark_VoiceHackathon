@@ -54,9 +54,18 @@ type AnthropicMessageResponse = {
   content?: Array<Record<string, unknown>>;
 };
 
+const MAX_HISTORY_TURNS = 20;
+const MAX_HISTORY_CHARS = 12_000;
+const MAX_TURN_CHARS = 1_800;
+const MAX_TOOL_RESULT_CHARS = 14_000;
+const TOOL_RESULT_MAX_DEPTH = 6;
+const TOOL_RESULT_MAX_ARRAY_ITEMS = 24;
+const TOOL_RESULT_MAX_OBJECT_KEYS = 40;
+const TOOL_RESULT_MAX_STRING_CHARS = 320;
+
 export class AnthropicService {
   private readonly historyBySession = new Map<string, Turn[]>();
-  private readonly maxHistory = 20;
+  private readonly maxHistory = MAX_HISTORY_TURNS;
   private readonly baseUrl = "https://api.anthropic.com/v1/messages";
 
   constructor(private readonly env: EnvConfig) {}
@@ -82,7 +91,7 @@ export class AnthropicService {
       return fallback;
     }
 
-    const history = this.getHistory(sessionId);
+    const history = this.getTrimmedHistory(sessionId);
     const messages: AnthropicMessage[] = [...history, { role: "user", content: userText }];
     const response = await this.callAnthropic({
       model: this.env.anthropicModel,
@@ -104,7 +113,7 @@ export class AnthropicService {
       return { text, proposal: null };
     }
 
-    const history = this.getHistory(params.sessionId);
+    const history = this.getTrimmedHistory(params.sessionId);
     const baseMessages: AnthropicMessage[] = [...history, { role: "user", content: params.userText }];
     let messages = baseMessages;
     const maxLoops = 4;
@@ -145,12 +154,24 @@ export class AnthropicService {
           break;
         }
 
-        const result = await params.executeReadTool(toolUse.name, args);
-        toolResults.push({
-          type: "tool_result",
-          tool_use_id: toolUse.id,
-          content: safeJson(result)
-        });
+        try {
+          const result = await params.executeReadTool(toolUse.name, args);
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            content: safeJsonForModel(compactToolResultForModel(result))
+          });
+        } catch (error) {
+          toolResults.push({
+            type: "tool_result",
+            tool_use_id: toolUse.id,
+            is_error: true,
+            content: safeJsonForModel({
+              error: toErrorMessage(error),
+              tool: toolUse.name
+            })
+          });
+        }
       }
 
       if (proposal) {
@@ -238,10 +259,30 @@ export class AnthropicService {
 
   private pushTurn(sessionId: string, turn: Turn): void {
     const turns = this.getHistory(sessionId);
-    turns.push(turn);
+    turns.push({
+      ...turn,
+      content: clampText(turn.content, MAX_TURN_CHARS)
+    });
     while (turns.length > this.maxHistory) {
       turns.shift();
     }
+  }
+
+  private getTrimmedHistory(sessionId: string): Turn[] {
+    const turns = this.getHistory(sessionId);
+    const selected: Turn[] = [];
+    let totalChars = 0;
+
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      totalChars += turn.content.length;
+      if (selected.length >= this.maxHistory || totalChars > MAX_HISTORY_CHARS) {
+        break;
+      }
+      selected.unshift(turn);
+    }
+
+    return selected;
   }
 
   private async callAnthropic(body: Record<string, unknown>): Promise<AnthropicMessageResponse> {
@@ -415,6 +456,79 @@ function safeJson(value: unknown): string {
   }
 }
 
+function safeJsonForModel(value: unknown): string {
+  const encoded = safeJson(value);
+  if (encoded.length <= MAX_TOOL_RESULT_CHARS) {
+    return encoded;
+  }
+
+  const previewLength = Math.min(3_000, Math.max(300, MAX_TOOL_RESULT_CHARS - 800));
+  return safeJson({
+    truncated: true,
+    originalLength: encoded.length,
+    preview: `${encoded.slice(0, previewLength)}...(truncated)`
+  });
+}
+
+function compactToolResultForModel(value: unknown): unknown {
+  return compactToolValue(value, 0, new WeakSet<object>());
+}
+
+function compactToolValue(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (value == null || typeof value === "number" || typeof value === "boolean") {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    return clampText(value, TOOL_RESULT_MAX_STRING_CHARS);
+  }
+
+  if (depth >= TOOL_RESULT_MAX_DEPTH) {
+    return "[truncated-depth]";
+  }
+
+  if (Array.isArray(value)) {
+    const limited = value.slice(0, TOOL_RESULT_MAX_ARRAY_ITEMS).map((entry) => compactToolValue(entry, depth + 1, seen));
+    if (value.length > TOOL_RESULT_MAX_ARRAY_ITEMS) {
+      limited.push(`[+${value.length - TOOL_RESULT_MAX_ARRAY_ITEMS} more items]`);
+    }
+    return limited;
+  }
+
+  if (isObject(value)) {
+    if (seen.has(value)) {
+      return "[circular]";
+    }
+    seen.add(value);
+
+    const entries = Object.entries(value);
+    const reduced: Record<string, unknown> = {};
+    for (const [key, entry] of entries.slice(0, TOOL_RESULT_MAX_OBJECT_KEYS)) {
+      reduced[key] = compactToolValue(entry, depth + 1, seen);
+    }
+    if (entries.length > TOOL_RESULT_MAX_OBJECT_KEYS) {
+      reduced.__truncatedKeys = entries.length - TOOL_RESULT_MAX_OBJECT_KEYS;
+    }
+    return reduced;
+  }
+
+  return String(value);
+}
+
+function clampText(value: string, maxChars: number): string {
+  if (value.length <= maxChars) {
+    return value;
+  }
+  return `${value.slice(0, Math.max(0, maxChars - 15))}...(truncated)`;
+}
+
 function isObject(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function toErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return String(error);
 }

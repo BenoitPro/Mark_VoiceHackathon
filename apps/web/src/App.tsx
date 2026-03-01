@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "@supabase/supabase-js";
 
 import type {
@@ -9,8 +9,21 @@ import type {
   ComposioConnectLinkResponse
 } from "@mark/contracts";
 
+import { ActionsTab } from "./components/ActionsTab";
+import { BottomNav } from "./components/BottomNav";
+import { StatusAlerts } from "./components/StatusAlerts";
+import { TopBar } from "./components/TopBar";
+import type { ProviderDiagnosticItem } from "./components/types";
+import { VoiceTab } from "./components/VoiceTab";
+import { useUiDensityMode } from "./hooks/useUiDensityMode";
 import { supabase } from "./supabase";
+import type { CatalogListItem } from "./tabs/AppsTab";
+import type { TimelineViewItem } from "./tabs/TimelineTab";
+import type { DesktopTabId, MobileTabId } from "./uiTypes";
 import { useVoiceAgent } from "./useVoiceAgent";
+
+const AppsTab = lazy(() => import("./tabs/AppsTab"));
+const TimelineTab = lazy(() => import("./tabs/TimelineTab"));
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
@@ -25,9 +38,13 @@ export function App() {
   const [loadingCatalog, setLoadingCatalog] = useState(false);
   const [connectingAuthConfigId, setConnectingAuthConfigId] = useState<string | null>(null);
   const [connectedBanner, setConnectedBanner] = useState<string | null>(null);
+  const [pendingConnectionRefresh, setPendingConnectionRefresh] = useState(false);
+  const [mobileTab, setMobileTab] = useState<MobileTabId>("voice");
+  const [desktopTab, setDesktopTab] = useState<DesktopTabId>("actions");
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const accessToken = session?.access_token ?? null;
+  const uiDensityMode = useUiDensityMode();
 
   const agent = useVoiceAgent(audioRef.current, accessToken);
 
@@ -51,8 +68,17 @@ export function App() {
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
-    if (params.get("connected") === "1") {
+    const connected = params.get("connected") === "1";
+    const status = (params.get("status") ?? "").toLowerCase();
+
+    if (connected || status === "success") {
       setConnectedBanner("Connection completed successfully.");
+      setPendingConnectionRefresh(true);
+    } else if (status === "failed") {
+      setError("Connection failed in Composio. Please try again.");
+    }
+
+    if (connected || status) {
       window.history.replaceState({}, document.title, window.location.pathname);
     }
   }, []);
@@ -68,6 +94,15 @@ export function App() {
 
     void refreshAuthedData(accessToken);
   }, [accessToken]);
+
+  useEffect(() => {
+    if (!accessToken || !pendingConnectionRefresh) {
+      return;
+    }
+    void refreshAuthedData(accessToken).finally(() => {
+      setPendingConnectionRefresh(false);
+    });
+  }, [accessToken, pendingConnectionRefresh]);
 
   useEffect(() => {
     if (!accessToken) {
@@ -96,14 +131,103 @@ export function App() {
   const connectionsByAuthConfigId = useMemo(() => {
     const map = new Map<string, ComposioConnectionItem>();
     for (const connection of connections) {
-      if (connection.authConfigId) {
-        map.set(connection.authConfigId, connection);
+      const authConfigId = connection.authConfigId;
+      if (!authConfigId) {
+        continue;
+      }
+      const existing = map.get(authConfigId);
+      if (!existing || connectionPriority(connection.status) > connectionPriority(existing.status)) {
+        map.set(authConfigId, connection);
       }
     }
     return map;
   }, [connections]);
 
-  const orbScale = 1 + Math.min(0.42, agent.audioLevel * 2.1);
+  const connectionsByToolkitSlug = useMemo(() => {
+    const map = new Map<string, ComposioConnectionItem>();
+    for (const connection of connections) {
+      const existing = map.get(connection.toolkitSlug);
+      if (!existing || connectionPriority(connection.status) > connectionPriority(existing.status)) {
+        map.set(connection.toolkitSlug, connection);
+      }
+    }
+    return map;
+  }, [connections]);
+
+  const catalogList = useMemo<CatalogListItem[]>(() => {
+    return filteredCatalog.map((item) => {
+      const connection =
+        connectionsByAuthConfigId.get(item.authConfigId) ?? connectionsByToolkitSlug.get(item.toolkitSlug);
+      const isActive = connection?.status.toUpperCase() === "ACTIVE";
+      return {
+        authConfigId: item.authConfigId,
+        toolkitName: item.toolkitName,
+        name: item.name,
+        authScheme: item.authScheme,
+        statusLabel: connection ? connection.status.toLowerCase() : "not connected",
+        isActive
+      };
+    });
+  }, [connectionsByAuthConfigId, connectionsByToolkitSlug, filteredCatalog]);
+
+  const timelineView = useMemo(() => {
+    if (agent.actionTimeline.length > 0) {
+      return {
+        sourceLabel: "Live session events",
+        items: agent.actionTimeline.slice(0, 16).map<TimelineViewItem>((item) => ({
+          id: item.id,
+          type: item.type,
+          message: item.message,
+          createdAt: item.createdAt
+        }))
+      };
+    }
+
+    if (history.length > 0) {
+      return {
+        sourceLabel: "Persisted action history",
+        items: history.slice(0, 16).map<TimelineViewItem>((item) => ({
+          id: item.id,
+          type: item.eventType,
+          message: summarizePayload(item.payload),
+          createdAt: item.createdAt
+        }))
+      };
+    }
+
+    return {
+      sourceLabel: "No events yet",
+      items: []
+    };
+  }, [agent.actionTimeline, history]);
+
+  const providerDiagnostics = useMemo<ProviderDiagnosticItem[]>(() => {
+    if (!agent.health) {
+      return [
+        { label: "STT", value: "checking" },
+        { label: "LLM", value: "checking" },
+        { label: "Composio", value: "checking" },
+        { label: "Auth", value: "checking" },
+        { label: "TTS", value: "checking" }
+      ];
+    }
+
+    return [
+      { label: "STT", value: agent.health.sttConfigured ? "ready" : "missing" },
+      { label: "LLM", value: agent.health.llmConfigured ? "ready" : "missing" },
+      { label: "Composio", value: agent.health.composioConfigured ? "ready" : "missing" },
+      { label: "Auth", value: agent.health.authConfigured ? "ready" : "missing" },
+      { label: "TTS", value: agent.health.ttsConfigured ? "ready" : "missing" },
+      {
+        label: "Speechmatics TTS",
+        value: agent.health.ttsProviders?.speechmaticsConfigured ? "ready" : "missing"
+      },
+      {
+        label: "ElevenLabs TTS",
+        value: agent.health.ttsProviders?.elevenLabsConfigured ? "ready" : "missing"
+      }
+    ];
+  }, [agent.health]);
 
   const signInWithGoogle = async (): Promise<void> => {
     if (!supabase) {
@@ -145,12 +269,192 @@ export function App() {
         },
         body: JSON.stringify({ authConfigId })
       });
-      window.location.href = payload.redirectUrl;
+
+      const popup = window.open(payload.redirectUrl, "_blank", "noopener,noreferrer");
+      if (!popup) {
+        window.location.href = payload.redirectUrl;
+        return;
+      }
+
+      setConnectedBanner("Connection flow opened in a new tab. Finish it there, then return here.");
+      setPendingConnectionRefresh(true);
+      void loadConnections(accessToken);
     } catch (err) {
       setError(toErrorMessage(err));
+    } finally {
       setConnectingAuthConfigId(null);
     }
   };
+
+  const isDesktop = uiDensityMode === "desktop";
+
+  const renderActionsTab = () => {
+    return (
+      <ActionsTab
+        pendingAction={agent.pendingAction}
+        onApprovePending={agent.approvePending}
+        onRejectPending={() => agent.rejectPending("Rejected from UI.")}
+        actionStatusMessage={agent.actionStatus?.message ?? null}
+        sttMessage={agent.sttStatus?.message ?? null}
+        activeTtsProvider={agent.activeTtsProvider}
+        providerDiagnostics={providerDiagnostics}
+      />
+    );
+  };
+
+  const renderAppsTab = () => {
+    return (
+      <Suspense fallback={<TabLoading label="Loading app catalog..." />}>
+        <AppsTab
+          loading={loadingCatalog}
+          search={catalogSearch}
+          onSearchChange={setCatalogSearch}
+          items={catalogList}
+          connectingAuthConfigId={connectingAuthConfigId}
+          onConnect={(authConfigId) => {
+            void connectApp(authConfigId);
+          }}
+        />
+      </Suspense>
+    );
+  };
+
+  const renderTimelineTab = () => {
+    return (
+      <Suspense fallback={<TabLoading label="Loading timeline..." />}>
+        <TimelineTab sourceLabel={timelineView.sourceLabel} items={timelineView.items} />
+      </Suspense>
+    );
+  };
+
+  return (
+    <div className="page">
+      <main className="shell">
+        <TopBar
+          session={session}
+          userEmail={user?.email ?? null}
+          onSignIn={() => {
+            void signInWithGoogle();
+          }}
+          onSignOut={() => {
+            void signOut();
+          }}
+        />
+
+        {!session ? (
+          <section className="auth-guard card">
+            <h2>Authentication Required</h2>
+            <p>
+              Sign in to unlock voice actions, app connections, and approval-gated execution. Voice loops remain protected
+              by Supabase access tokens.
+            </p>
+            <button
+              className="btn btn-primary"
+              onClick={() => {
+                void signInWithGoogle();
+              }}
+            >
+              Continue With Google
+            </button>
+            {!supabase ? <p className="alert alert-error">Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`.</p> : null}
+          </section>
+        ) : (
+          <>
+            <StatusAlerts connectedBanner={connectedBanner} errorMessage={agent.error ?? error} />
+
+            {isDesktop ? (
+              <section className="desktop-grid" aria-label="Main Workspace">
+                <div className="desktop-primary">
+                  <VoiceTab
+                    connected={agent.connected}
+                    voiceState={agent.voiceState}
+                    sttCode={agent.sttStatus?.code ?? null}
+                    sessionId={agent.sessionId}
+                    isRunning={agent.isRunning}
+                    canResetMemory={agent.connected}
+                    userFinal={agent.userFinal}
+                    userPartial={agent.userPartial}
+                    agentFinal={agent.agentFinal}
+                    agentPartial={agent.agentPartial}
+                    audioLevel={agent.audioLevel}
+                    onStart={() => {
+                      void agent.start();
+                    }}
+                    onStop={() => {
+                      void agent.stop();
+                    }}
+                    onResetMemory={agent.resetMemory}
+                  />
+                </div>
+
+                <aside className="desktop-secondary">
+                  <nav className="segmented-nav" aria-label="Secondary tabs">
+                    <button
+                      className={`segmented-nav-item ${desktopTab === "actions" ? "is-active" : ""}`}
+                      onClick={() => setDesktopTab("actions")}
+                    >
+                      Actions
+                    </button>
+                    <button
+                      className={`segmented-nav-item ${desktopTab === "apps" ? "is-active" : ""}`}
+                      onClick={() => setDesktopTab("apps")}
+                    >
+                      Apps
+                    </button>
+                    <button
+                      className={`segmented-nav-item ${desktopTab === "timeline" ? "is-active" : ""}`}
+                      onClick={() => setDesktopTab("timeline")}
+                    >
+                      Timeline
+                    </button>
+                  </nav>
+
+                  {desktopTab === "actions" ? renderActionsTab() : null}
+                  {desktopTab === "apps" ? renderAppsTab() : null}
+                  {desktopTab === "timeline" ? renderTimelineTab() : null}
+                </aside>
+              </section>
+            ) : (
+              <section className="mobile-layout" aria-label="Main Workspace">
+                <div className="mobile-content">
+                  {mobileTab === "voice" ? (
+                    <VoiceTab
+                      connected={agent.connected}
+                      voiceState={agent.voiceState}
+                      sttCode={agent.sttStatus?.code ?? null}
+                      sessionId={agent.sessionId}
+                      isRunning={agent.isRunning}
+                      canResetMemory={agent.connected}
+                      userFinal={agent.userFinal}
+                      userPartial={agent.userPartial}
+                      agentFinal={agent.agentFinal}
+                      agentPartial={agent.agentPartial}
+                      audioLevel={agent.audioLevel}
+                      onStart={() => {
+                        void agent.start();
+                      }}
+                      onStop={() => {
+                        void agent.stop();
+                      }}
+                      onResetMemory={agent.resetMemory}
+                    />
+                  ) : null}
+
+                  {mobileTab === "actions" ? renderActionsTab() : null}
+                  {mobileTab === "apps" ? renderAppsTab() : null}
+                  {mobileTab === "timeline" ? renderTimelineTab() : null}
+                </div>
+
+                <BottomNav activeTab={mobileTab} onSelectTab={setMobileTab} />
+              </section>
+            )}
+          </>
+        )}
+      </main>
+
+      <audio ref={audioRef} hidden playsInline />
+    </div>
+  );
 
   async function refreshAuthedData(token: string): Promise<void> {
     setLoadingCatalog(true);
@@ -179,237 +483,13 @@ export function App() {
       const nextConnections = await authedFetch<ComposioConnectionItem[]>("/v1/composio/connections", token);
       setConnections(nextConnections);
     } catch {
-      // keep last successful snapshot
+      // Keep last successful snapshot.
     }
   }
+}
 
-  return (
-    <div className="page">
-      <div className="ambient ambient-a" />
-      <div className="ambient ambient-b" />
-      <div className="grain" />
-
-      <main className="shell">
-        <header className="topbar glass">
-          <div>
-            <p className="overline">Mark Agent</p>
-            <h1>Voice + Action Runtime</h1>
-            <p className="subtitle">Speechmatics STT • Anthropic • Composio • Supabase • ElevenLabs</p>
-          </div>
-          <div className="actions">
-            {session ? (
-              <>
-                <span className="auth-pill">{user?.email ?? "authenticated"}</span>
-                <button className="btn" onClick={() => void signOut()}>
-                  Sign Out
-                </button>
-              </>
-            ) : (
-              <button className="btn btn-primary" onClick={() => void signInWithGoogle()}>
-                Sign In With Google
-              </button>
-            )}
-          </div>
-        </header>
-
-        {!session ? (
-          <section className="auth-guard glass">
-            <h2>Authentication Required</h2>
-            <p>
-              Sign in to unlock voice actions, app connections, and approval-gated execution. The voice loop remains
-              protected by Supabase access tokens.
-            </p>
-            <button className="btn btn-primary" onClick={() => void signInWithGoogle()}>
-              Continue With Google
-            </button>
-            {!supabase ? <p className="error">Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`.</p> : null}
-          </section>
-        ) : (
-          <>
-            <section className="status-row glass">
-              <span>
-                Socket: <strong>{agent.connected ? "connected" : "disconnected"}</strong>
-              </span>
-              <span>
-                State: <strong>{agent.voiceState}</strong>
-              </span>
-              <span>
-                STT: <strong>{agent.sttStatus?.code ?? "n/a"}</strong>
-              </span>
-              <span>
-                Session: <strong>{agent.sessionId ?? "pending"}</strong>
-              </span>
-            </section>
-
-            <div className="workspace">
-              <section className="voice-stack">
-                <article className="control-box glass">
-                  <div className="actions">
-                    {!agent.isRunning ? (
-                      <button className="btn btn-primary" onClick={() => void agent.start()}>
-                        Start Listening
-                      </button>
-                    ) : (
-                      <button className="btn" onClick={() => void agent.stop()}>
-                        Stop
-                      </button>
-                    )}
-                    <button className="btn" onClick={agent.resetMemory} disabled={!agent.connected}>
-                      Reset Memory
-                    </button>
-                  </div>
-                  <p className="minor">
-                    Approval policy: read tools auto-run. Mutating tools remain in draft until you approve or reject.
-                  </p>
-                </article>
-
-                <section className="center">
-                  <div className={`orb-wrap state-${agent.voiceState}`}>
-                    <div className="orb-glow" />
-                    <div className="orb" style={{ transform: `scale(${orbScale.toFixed(3)})` }}>
-                      <span>{agent.voiceState}</span>
-                    </div>
-                  </div>
-                </section>
-
-                <section className="lanes">
-                  <article className="lane glass">
-                    <header>
-                      <h2>Your Voice</h2>
-                      <small>live transcript</small>
-                    </header>
-                    <p className="final-text">{agent.userFinal || "Speak to begin..."}</p>
-                    <p className="partial-text">{agent.userPartial}</p>
-                  </article>
-
-                  <article className="lane glass">
-                    <header>
-                      <h2>Agent Voice</h2>
-                      <small>live response</small>
-                    </header>
-                    <p className="final-text">{agent.agentFinal || "Waiting for your first prompt."}</p>
-                    <p className="partial-text">{agent.agentPartial}</p>
-                  </article>
-                </section>
-              </section>
-
-              <aside className="side-stack">
-                <section className="panel glass">
-                  <header className="panel-head">
-                    <h3>Connect Apps</h3>
-                    <small>{catalog.length} auth configs</small>
-                  </header>
-                  <input
-                    className="input"
-                    placeholder="Search by app or toolkit"
-                    value={catalogSearch}
-                    onChange={(event) => setCatalogSearch(event.target.value)}
-                  />
-                  <div className="list">
-                    {loadingCatalog ? <p className="minor">Loading catalog...</p> : null}
-                    {!loadingCatalog && filteredCatalog.length === 0 ? <p className="minor">No matching apps.</p> : null}
-                    {filteredCatalog.map((item) => {
-                      const connection = connectionsByAuthConfigId.get(item.authConfigId);
-                      const isActive = connection?.status.toUpperCase() === "ACTIVE";
-                      return (
-                        <article className="list-item" key={item.authConfigId}>
-                          <div>
-                            <p className="list-title">{item.toolkitName}</p>
-                            <p className="list-meta">
-                              {item.name} · {item.authScheme ?? "oauth"}
-                            </p>
-                          </div>
-                          <div className="list-actions">
-                            <span className={`pill ${isActive ? "pill-ok" : "pill-warn"}`}>
-                              {connection ? connection.status.toLowerCase() : "not connected"}
-                            </span>
-                            <button
-                              className="btn btn-xs"
-                              onClick={() => void connectApp(item.authConfigId)}
-                              disabled={connectingAuthConfigId === item.authConfigId}
-                            >
-                              {connectingAuthConfigId === item.authConfigId ? "Connecting..." : "Connect"}
-                            </button>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <section className="panel glass">
-                  <header className="panel-head">
-                    <h3>Pending Action</h3>
-                    <small>{agent.pendingAction ? "awaiting decision" : "none"}</small>
-                  </header>
-                  {agent.pendingAction ? (
-                    <div className="pending">
-                      <p className="pending-title">{agent.pendingAction.toolSlug}</p>
-                      <p className="minor">{agent.pendingAction.summary}</p>
-                      <pre>{JSON.stringify(agent.pendingAction.arguments, null, 2)}</pre>
-                      <div className="actions">
-                        <button className="btn btn-primary" onClick={agent.approvePending}>
-                          Approve
-                        </button>
-                        <button className="btn" onClick={() => agent.rejectPending("Rejected from UI.")}>
-                          Reject
-                        </button>
-                      </div>
-                      <p className="minor">
-                        Voice edits are enabled. You can keep revising naturally, then approve when it matches intent.
-                      </p>
-                    </div>
-                  ) : (
-                    <p className="minor">No pending draft. Ask for a write action (send/create/update) to open one.</p>
-                  )}
-                </section>
-
-                <section className="panel glass">
-                  <header className="panel-head">
-                    <h3>Action Timeline</h3>
-                    <small>latest events first</small>
-                  </header>
-                  <div className="timeline">
-                    {agent.actionTimeline.slice(0, 16).map((item) => (
-                      <article className="timeline-item" key={item.id}>
-                        <p className="timeline-type">{item.type}</p>
-                        <p>{item.message}</p>
-                        <time>{new Date(item.createdAt).toLocaleString()}</time>
-                      </article>
-                    ))}
-                    {agent.actionTimeline.length === 0 && history.slice(0, 16).map((item) => (
-                      <article className="timeline-item" key={item.id}>
-                        <p className="timeline-type">{item.eventType}</p>
-                        <p>{summarizePayload(item.payload)}</p>
-                        <time>{new Date(item.createdAt).toLocaleString()}</time>
-                      </article>
-                    ))}
-                    {agent.actionTimeline.length === 0 && history.length === 0 ? (
-                      <p className="minor">No action events yet.</p>
-                    ) : null}
-                  </div>
-                </section>
-              </aside>
-            </div>
-
-            <section className="footer-strip glass">
-              <span>
-                Providers:
-                {agent.health
-                  ? ` STT ${agent.health.sttConfigured ? "ready" : "missing"} · LLM ${agent.health.llmConfigured ? "ready" : "missing"} · Composio ${agent.health.composioConfigured ? "ready" : "missing"} · Auth ${agent.health.authConfigured ? "ready" : "missing"} · TTS ${agent.health.ttsConfigured ? "ready" : "missing"}`
-                  : " checking..."}
-              </span>
-              <span>{agent.sttStatus?.message ?? "No status yet."}</span>
-              {connectedBanner ? <span className="ok">{connectedBanner}</span> : null}
-              {agent.error || error ? <span className="error">{agent.error ?? error}</span> : null}
-            </section>
-          </>
-        )}
-      </main>
-
-      <audio ref={audioRef} hidden playsInline />
-    </div>
-  );
+function TabLoading({ label }: { label: string }) {
+  return <p className="compact-text muted">{label}</p>;
 }
 
 async function authedFetch<T>(path: string, accessToken: string, init?: RequestInit): Promise<T> {
@@ -435,7 +515,7 @@ function summarizePayload(payload: Record<string, unknown>): string {
   return keys
     .slice(0, 4)
     .map((key) => `${key}: ${preview(payload[key])}`)
-    .join(" · ");
+    .join(" • ");
 }
 
 function preview(value: unknown): string {
@@ -446,6 +526,24 @@ function preview(value: unknown): string {
     return String(value);
   }
   return "[structured]";
+}
+
+function connectionPriority(status: string): number {
+  switch (status.trim().toUpperCase()) {
+    case "ACTIVE":
+      return 5;
+    case "INITIALIZING":
+    case "INITIATED":
+      return 4;
+    case "INACTIVE":
+      return 3;
+    case "EXPIRED":
+      return 2;
+    case "FAILED":
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 function toErrorMessage(err: unknown): string {

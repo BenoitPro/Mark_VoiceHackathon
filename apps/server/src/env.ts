@@ -23,6 +23,9 @@ type EnvConfig = {
   anthropicModel: string;
   speechmaticsApiKey: string | null;
   speechmaticsApiBaseUrl: string;
+  speechmaticsTtsBaseUrl: string;
+  speechmaticsTtsVoice: string;
+  speechmaticsTtsOutputFormat: "wav_16000" | "pcm_16000";
   speechmaticsRtUrl: string;
   speechmaticsLanguage: string;
   speechmaticsEnablePartials: boolean;
@@ -63,6 +66,11 @@ function readNumber(name: string, fallback: number): number {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+function readSpeechmaticsTtsOutputFormat(): "wav_16000" | "pcm_16000" {
+  const raw = readString("SPEECHMATICS_TTS_OUTPUT_FORMAT", "wav_16000");
+  return raw === "pcm_16000" ? "pcm_16000" : "wav_16000";
+}
+
 export function getEnvConfig(): EnvConfig {
   const port = readNumber("PORT", 4000);
   const webOrigin = readString("WEB_ORIGIN", "http://localhost:5173");
@@ -83,6 +91,9 @@ export function getEnvConfig(): EnvConfig {
     anthropicModel: readString("ANTHROPIC_MODEL", "claude-sonnet-4-5"),
     speechmaticsApiKey: readOptional("SPEECHMATICS_API_KEY"),
     speechmaticsApiBaseUrl: readString("SPEECHMATICS_API_BASE_URL", "https://asr.api.speechmatics.com/v2"),
+    speechmaticsTtsBaseUrl: readString("SPEECHMATICS_TTS_BASE_URL", "https://preview.tts.speechmatics.com"),
+    speechmaticsTtsVoice: readString("SPEECHMATICS_TTS_VOICE", "sarah"),
+    speechmaticsTtsOutputFormat: readSpeechmaticsTtsOutputFormat(),
     speechmaticsRtUrl: readString("SPEECHMATICS_RT_URL", "wss://eu2.rt.speechmatics.com/v2"),
     speechmaticsLanguage: readString("SPEECHMATICS_LANGUAGE", "en"),
     speechmaticsEnablePartials: readBoolean("SPEECHMATICS_ENABLE_PARTIALS", true),

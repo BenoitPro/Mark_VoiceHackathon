@@ -38,6 +38,8 @@ import { ComposioService } from "./composio.js";
 import { ElevenLabsService } from "./elevenlabs.js";
 import { getEnvConfig } from "./env.js";
 import { SpeechmaticsAdapter } from "./speechmatics.js";
+import { SpeechmaticsTtsService } from "./speechmaticsTts.js";
+import { TtsRouter } from "./ttsRouter.js";
 
 type SessionState = {
   user: AuthenticatedUser;
@@ -52,7 +54,9 @@ type AuthedRequest = Request & {
 const env = getEnvConfig();
 const stt = new SpeechmaticsAdapter(env);
 const llm = new AnthropicService(env);
-const tts = new ElevenLabsService(env);
+const elevenLabsTts = new ElevenLabsService(env);
+const speechmaticsTts = new SpeechmaticsTtsService(env);
+const tts = new TtsRouter(speechmaticsTts, elevenLabsTts);
 const auth = new AuthService(env);
 const audit = new AuditService(env);
 const composio = new ComposioService(env);
@@ -72,7 +76,12 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     sttConfigured: stt.isConfigured(),
-    ttsConfigured: tts.isConfigured(),
+    ttsConfigured: tts.isAnyConfigured(),
+    ttsProviders: {
+      speechmaticsConfigured: speechmaticsTts.isConfigured(),
+      elevenLabsConfigured: elevenLabsTts.isConfigured(),
+      priority: ["speechmatics", "elevenlabs"] as const
+    },
     llmConfigured: llm.isConfigured(),
     authConfigured: auth.isConfigured(),
     composioConfigured: composio.isConfigured()
@@ -82,7 +91,12 @@ app.get("/health", (_req, res) => {
 app.get("/health/voice", (_req, res) => {
   res.json({
     sttConfigured: stt.isConfigured(),
-    ttsConfigured: tts.isConfigured(),
+    ttsConfigured: tts.isAnyConfigured(),
+    ttsProviders: {
+      speechmaticsConfigured: speechmaticsTts.isConfigured(),
+      elevenLabsConfigured: elevenLabsTts.isConfigured(),
+      priority: ["speechmatics", "elevenlabs"] as const
+    },
     llmConfigured: llm.isConfigured(),
     authConfigured: auth.isConfigured(),
     composioConfigured: composio.isConfigured(),
@@ -300,6 +314,11 @@ async function handleUserUtterance(socket: Socket, payload: AudioUserUtteranceEv
 
     await processFinalTranscript(socket, transcript);
   } catch (err) {
+    console.error("[voice][stt] utterance processing failed", {
+      sessionId: socket.id,
+      userId: state.user.id,
+      error: toErrorMessage(err)
+    });
     emitError(socket, `Speech transcription failed: ${toErrorMessage(err)}`);
     emitSttStatus(socket, {
       code: "provider_error",
@@ -334,7 +353,18 @@ async function processFinalTranscript(socket: Socket, rawText: string): Promise<
 
   let finalReply = "";
   try {
-    const toolsByName = await composio.listToolsByUser(state.user.composioUserId);
+    let toolsByName: Record<string, Awaited<ReturnType<typeof composio.listToolsByUser>>[string]> = {};
+    try {
+      toolsByName = await composio.listToolsByUser(state.user.composioUserId);
+    } catch (toolCatalogError) {
+      console.error("[voice][tools] failed to list tools", {
+        sessionId: socket.id,
+        userId: state.user.id,
+        error: toErrorMessage(toolCatalogError)
+      });
+      emitError(socket, `Tool catalog unavailable: ${toErrorMessage(toolCatalogError)}`);
+      toolsByName = {};
+    }
     const availableTools = Object.values(toolsByName).map((tool) => ({
       name: tool.toolName,
       description: tool.description,
@@ -389,8 +419,25 @@ async function processFinalTranscript(socket: Socket, rawText: string): Promise<
       }
     }
   } catch (err) {
+    console.error("[voice][agent] llm/action loop failed", {
+      sessionId: socket.id,
+      userId: state.user.id,
+      input: text,
+      error: toErrorMessage(err)
+    });
     emitError(socket, `LLM/action loop failed: ${toErrorMessage(err)}`);
-    finalReply = "I could not process that right now. Please try again.";
+    try {
+      finalReply = await llm.generateReply(socket.id, text, (partialText) => {
+        socket.emit(WS_EVENTS.AGENT_REPLY_PARTIAL, { text: partialText } satisfies AgentReplyEvent);
+      });
+    } catch (fallbackError) {
+      console.error("[voice][agent] fallback reply failed", {
+        sessionId: socket.id,
+        userId: state.user.id,
+        error: toErrorMessage(fallbackError)
+      });
+      finalReply = "I had trouble accessing tools just now. Please retry in a few seconds.";
+    }
   }
 
   await emitAgentFinalAndSpeak(socket, finalReply);
@@ -549,19 +596,30 @@ async function emitAgentFinalAndSpeak(socket: Socket, finalReply: string): Promi
   socket.emit(WS_EVENTS.AGENT_REPLY_FINAL, { text: finalReply } satisfies AgentReplyEvent);
 
   try {
-    const streamId = await tts.synthesizeStream(finalReply, (chunk, id) => {
+    const ttsResult = await tts.synthesizeWithPriority(finalReply, ({ chunk, streamId, provider, contentType }) => {
       socket.emit(
         WS_EVENTS.TTS_AUDIO_CHUNK,
         {
-          streamId: id,
+          streamId,
           chunkBase64: chunk.toString("base64"),
-          contentType: "audio/mpeg"
+          contentType,
+          provider
         } satisfies TtsAudioChunkEvent
       );
     });
 
-    socket.emit(WS_EVENTS.TTS_AUDIO_END, { streamId } satisfies TtsAudioEndEvent);
+    socket.emit(
+      WS_EVENTS.TTS_AUDIO_END,
+      {
+        streamId: ttsResult.streamId,
+        provider: ttsResult.provider
+      } satisfies TtsAudioEndEvent
+    );
   } catch (err) {
+    console.error("[voice][tts] synthesis failed", {
+      sessionId: socket.id,
+      error: toErrorMessage(err)
+    });
     emitError(socket, `TTS failed: ${toErrorMessage(err)}`);
   } finally {
     emitSttStatus(socket, {

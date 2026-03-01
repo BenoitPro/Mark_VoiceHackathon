@@ -2,6 +2,7 @@ export class StreamingTtsPlayer {
   private audio: HTMLAudioElement;
   private onPlaybackChange: (isPlaying: boolean) => void;
   private activeStreamId: string | null = null;
+  private activeContentType: "audio/mpeg" | "audio/wav" | null = null;
   private usingMediaSource = false;
   private mediaSource: MediaSource | null = null;
   private sourceBuffer: SourceBuffer | null = null;
@@ -18,8 +19,8 @@ export class StreamingTtsPlayer {
     this.audio.addEventListener("pause", this.handlePause);
   }
 
-  enqueueChunk(streamId: string, chunkBase64: string): void {
-    this.ensureStream(streamId);
+  enqueueChunk(streamId: string, chunkBase64: string, contentType: "audio/mpeg" | "audio/wav"): void {
+    this.ensureStream(streamId, contentType);
     const bytes = base64ToBytes(chunkBase64);
     this.fallbackChunks.push(bytes);
 
@@ -61,17 +62,20 @@ export class StreamingTtsPlayer {
     this.audio.removeEventListener("pause", this.handlePause);
   }
 
-  private ensureStream(streamId: string): void {
+  private ensureStream(streamId: string, contentType: "audio/mpeg" | "audio/wav"): void {
     if (this.activeStreamId === streamId) {
       return;
     }
 
     this.cleanupStream();
     this.activeStreamId = streamId;
+    this.activeContentType = contentType;
     this.endRequested = false;
 
     this.usingMediaSource =
-      typeof MediaSource !== "undefined" && MediaSource.isTypeSupported("audio/mpeg");
+      contentType === "audio/mpeg" &&
+      typeof MediaSource !== "undefined" &&
+      MediaSource.isTypeSupported("audio/mpeg");
 
     if (!this.usingMediaSource) {
       return;
@@ -153,7 +157,7 @@ export class StreamingTtsPlayer {
     }
 
     const blobParts = this.fallbackChunks.map((chunk) => copyToArrayBuffer(chunk));
-    const blob = new Blob(blobParts, { type: "audio/mpeg" });
+    const blob = new Blob(blobParts, { type: this.activeContentType ?? "audio/mpeg" });
     const url = URL.createObjectURL(blob);
 
     if (this.objectUrl) {
@@ -186,6 +190,7 @@ export class StreamingTtsPlayer {
 
   private cleanupStream(): void {
     this.activeStreamId = null;
+    this.activeContentType = null;
     this.endRequested = false;
     this.appendQueue = [];
     this.fallbackChunks = [];

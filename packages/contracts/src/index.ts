@@ -49,14 +49,18 @@ export interface AgentReplyEvent {
   text: string;
 }
 
+export type TtsProvider = "speechmatics" | "elevenlabs";
+
 export interface TtsAudioChunkEvent {
   streamId: string;
   chunkBase64: string;
-  contentType: "audio/mpeg";
+  contentType: "audio/mpeg" | "audio/wav";
+  provider: TtsProvider;
 }
 
 export interface TtsAudioEndEvent {
   streamId: string;
+  provider: TtsProvider;
 }
 
 export type SttStatusCode = "warming_up" | "listening" | "provider_error" | "mic_inactive";

@@ -5,7 +5,7 @@ Authenticated voice-first web app using:
 - Composio (connectable app catalog + tool execution)
 - Anthropic (reasoning + tool orchestration + draft revision)
 - Speechmatics (one-shot STT)
-- ElevenLabs (streaming TTS)
+- Speechmatics-first TTS (`wav_16000`) with ElevenLabs fallback
 
 Flow:
 - Browser records utterances, auto-detects end-of-speech, encodes to MP3, and sends one-shot audio for STT.
@@ -35,6 +35,9 @@ Required server env keys:
 - `COMPOSIO_CONNECT_CALLBACK_URL`
 - `ANTHROPIC_API_KEY`
 - `SPEECHMATICS_API_KEY`
+- `SPEECHMATICS_TTS_BASE_URL` (default provided)
+- `SPEECHMATICS_TTS_VOICE` (default `sarah`)
+- `SPEECHMATICS_TTS_OUTPUT_FORMAT` (default `wav_16000`)
 - `ELEVENLABS_API_KEY`
 
 Required web env keys:
@@ -77,4 +80,5 @@ pnpm test
 - Authentication is mandatory for action-capable sessions.
 - Conversation memory is in-memory and resets on server restart.
 - Action/audit persistence is available when Supabase schema is applied.
+- TTS priority is Speechmatics first, then ElevenLabs fallback.
 - Real credentials should stay in `.env.local` only.
