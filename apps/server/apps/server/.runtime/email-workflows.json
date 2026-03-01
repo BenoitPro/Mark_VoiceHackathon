@@ -140,6 +140,78 @@
         "currentEmailId": null,
         "lastDraft": null
       }
+    },
+    {
+      "workflowId": "8099c161-67b8-43e4-8510-f719db0de56d",
+      "userId": "560fdf4a-7281-4da3-a787-494c3800a56f",
+      "sessionId": "nzDxUzv0OKdfr53eAAAD",
+      "createdAt": "2026-03-01T13:57:02.588Z",
+      "updatedAt": "2026-03-01T13:57:02.588Z",
+      "windowLabel": "the last 24 hours",
+      "resolvedQuery": "newer_than:1d label:inbox is:unread",
+      "timeZone": "Europe/Paris",
+      "scannedCount": 13,
+      "optionalCount": 11,
+      "capHit": false,
+      "respondNeededItems": [],
+      "mustKnowItems": [
+        {
+          "id": "19ca99c4636067a0",
+          "threadId": "19ca8d6cbbeeade5",
+          "from": "Google <no-reply@accounts.google.com>",
+          "subject": "Security alert",
+          "timestamp": "2026-03-01T13:35:15.000Z",
+          "snippet": "[image: Google] You allowed Composio access to some of your Google Account data benoitbaillon78@gmail.com If you didn’t allow Composio access to some of your Google Account data, someone else may be trying...(truncated)",
+          "labelIds": [
+            "UNREAD",
+            "IMPORTANT",
+            "CATEGORY_UPDATES",
+            "INBOX"
+          ],
+          "category": "must_know",
+          "reason": "Critical account, security, or billing alert.",
+          "status": "triaged",
+          "selectedAt": null,
+          "sentAt": null,
+          "sentActionId": null,
+          "sentRevisionId": null,
+          "sentToolSlug": null,
+          "draftVersions": []
+        },
+        {
+          "id": "19ca628e65c347cf",
+          "threadId": "19ca5ee9fca1b387",
+          "from": "Google <no-reply@accounts.google.com>",
+          "subject": "Alerte de sécurité pour fantouille9@gmail.com",
+          "timestamp": "2026-02-28T21:30:23.000Z",
+          "snippet": "Ceci est une copie d'une alerte de sécurité envoyée à fantouille9@gmail.com. benoitbaillon78@gmail.com est l'adresse e-mail de récupération de ce compte. Si vous ne reconnaissez pas ce compte, supprimez-la...(truncated)",
+          "labelIds": [
+            "UNREAD",
+            "IMPORTANT",
+            "CATEGORY_UPDATES",
+            "INBOX"
+          ],
+          "category": "must_know",
+          "reason": "Google security alert for account – potential unauthorized access or security event requiring immediate attention",
+          "status": "triaged",
+          "selectedAt": null,
+          "sentAt": null,
+          "sentActionId": null,
+          "sentRevisionId": null,
+          "sentToolSlug": null,
+          "draftVersions": []
+        }
+      ],
+      "conversation": {
+        "phase": "awaiting_choice",
+        "selectedCategory": null,
+        "selectedIndexByCategory": {
+          "respond_needed": 0,
+          "must_know": 0
+        },
+        "currentEmailId": null,
+        "lastDraft": null
+      }
     }
   ]
 }

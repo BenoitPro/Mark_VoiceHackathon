@@ -1,5 +1,6 @@
 export type CatalogListItem = {
   authConfigId: string;
+  toolkitSlug: string;
   toolkitName: string;
   name: string;
   authScheme: string | null;

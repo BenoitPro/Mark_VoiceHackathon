@@ -87,7 +87,7 @@ describe("useActionNotifications", () => {
     expect(statusNotifications[0]?.message).toBe("Still executing task.");
   });
 
-  it("auto dismisses terminal notifications after dwell and exit animation", () => {
+  it("keeps terminal notifications in recent activity history", () => {
     const { result } = renderHook(() =>
       useActionNotifications({
         actionTimeline: [
@@ -108,12 +108,43 @@ describe("useActionNotifications", () => {
     act(() => {
       vi.advanceTimersByTime(2400);
     });
-    expect(result.current[0]?.visualState).toBe("exiting");
+    expect(result.current[0]?.visualState).toBe("visible");
 
     act(() => {
       vi.advanceTimersByTime(320);
     });
-    expect(result.current).toHaveLength(0);
+    expect(result.current).toHaveLength(1);
+  });
+
+  it("keeps approval notifications in history after pending action is cleared", () => {
+    const pendingAction = createPendingAction();
+    type PendingActionProps = { activePendingAction: ActionDraft | null };
+
+    const { result, rerender } = renderHook(
+      ({ activePendingAction }: PendingActionProps) =>
+        useActionNotifications({
+          actionTimeline: [],
+          pendingAction: activePendingAction,
+          actionStatus: null
+        }),
+      {
+        initialProps: {
+          activePendingAction: null
+        } as PendingActionProps
+      }
+    );
+
+    rerender({ activePendingAction: pendingAction });
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]?.type).toBe("action.proposed");
+
+    rerender({ activePendingAction: null });
+    act(() => {
+      vi.advanceTimersByTime(320);
+    });
+
+    expect(result.current).toHaveLength(1);
+    expect(result.current[0]?.visualState).toBe("visible");
   });
 });
 
@@ -136,5 +167,23 @@ function createTimelineItem(overrides: {
     type: overrides.type,
     message: overrides.message,
     createdAt: NOW
+  };
+}
+
+function createPendingAction(): ActionDraft {
+  return {
+    actionId: "action-1",
+    revisionId: "revision-1",
+    status: "pending_approval",
+    toolSlug: "send_email",
+    toolkitSlug: "gmail",
+    connectedAccountId: "acct-1",
+    summary: "Draft ready for approval.",
+    arguments: {
+      to: "ops@example.com"
+    },
+    requiresApproval: true,
+    createdAt: NOW,
+    updatedAt: NOW
   };
 }

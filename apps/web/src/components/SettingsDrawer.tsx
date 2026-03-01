@@ -1,13 +1,18 @@
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, type KeyboardEvent, type RefObject } from "react";
 
 import type { CatalogListItem } from "../tabs/AppsTab";
-import AppsTab from "../tabs/AppsTab";
-import TimelineTab, { type TimelineViewItem } from "../tabs/TimelineTab";
+import type { TimelineViewItem } from "../tabs/TimelineTab";
+import { categorizeAppSlug, STITCH_CATEGORY_LABELS, STITCH_CATEGORY_ORDER, type StitchAppCategoryId } from "./stitch/stitch-app-categories";
+import { StitchAppLogo } from "./stitch/stitch-app-logo";
 import type { ProviderDiagnosticItem } from "./types";
+
+export type SettingsDrawerSection = "session" | "apps" | "timeline";
 
 type SettingsDrawerProps = {
   open: boolean;
   onClose: () => void;
+  returnFocusRef?: RefObject<HTMLElement | null> | null;
+  defaultSection?: SettingsDrawerSection;
   isRunning: boolean;
   canResetMemory: boolean;
   sessionId: string | null;
@@ -29,9 +34,20 @@ type SettingsDrawerProps = {
   timelineItems: TimelineViewItem[];
 };
 
+const FOCUSABLE_SELECTOR = [
+  "button:not([disabled]):not([tabindex='-1'])",
+  "[href]",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  "[tabindex]:not([tabindex='-1'])"
+].join(", ");
+
 export function SettingsDrawer({
   open,
   onClose,
+  returnFocusRef = null,
+  defaultSection = "apps",
   isRunning,
   canResetMemory,
   sessionId,
@@ -52,106 +68,258 @@ export function SettingsDrawer({
   timelineSourceLabel,
   timelineItems
 }: SettingsDrawerProps) {
+  const dialogRef = useRef<HTMLElement | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") {
-        onClose();
-      }
+    const frame = window.requestAnimationFrame(() => {
+      closeButtonRef.current?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+    };
+  }, [open]);
+
+  const filteredItems = useMemo(() => {
+    const needle = appsSearch.trim().toLowerCase();
+    if (!needle) {
+      return appsItems;
+    }
+
+    return appsItems.filter((item) => {
+      const terms = [item.toolkitName, item.name, item.toolkitSlug, item.authScheme ?? "", item.statusLabel];
+      return terms.some((term) => term.toLowerCase().includes(needle));
+    });
+  }, [appsItems, appsSearch]);
+
+  const groupedItems = useMemo(() => {
+    const groups: Record<StitchAppCategoryId, CatalogListItem[]> = {
+      email: [],
+      messaging: [],
+      productivity: [],
+      other: []
     };
 
-    window.addEventListener("keydown", onKeyDown);
-    return () => {
-      window.removeEventListener("keydown", onKeyDown);
-    };
-  }, [open, onClose]);
+    for (const item of filteredItems) {
+      groups[categorizeAppSlug(item.toolkitSlug)].push(item);
+    }
+
+    return groups;
+  }, [filteredItems]);
+
+  const timelinePreview = useMemo(() => {
+    return timelineItems.slice(0, 6);
+  }, [timelineItems]);
 
   if (!open) {
     return null;
   }
 
+  const handleClose = (): void => {
+    onClose();
+    window.requestAnimationFrame(() => {
+      returnFocusRef?.current?.focus();
+    });
+  };
+
+  const handleDialogKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      handleClose();
+      return;
+    }
+
+    if (event.key !== "Tab" || !dialogRef.current) {
+      return;
+    }
+
+    const focusable = Array.from(dialogRef.current.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
+      (element) => !element.hasAttribute("disabled")
+    );
+
+    if (focusable.length === 0) {
+      return;
+    }
+
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement as HTMLElement | null;
+
+    if (event.shiftKey && active === first) {
+      event.preventDefault();
+      last.focus();
+      return;
+    }
+
+    if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
   return (
     <>
-      <button className="settings-backdrop" onClick={onClose} aria-label="Close settings panel" />
-      <aside className="settings-drawer" role="dialog" aria-modal="true" aria-label="Voice settings and controls">
-        <header className="settings-head">
-          <h2>Settings</h2>
-          <button className="btn btn-compact" onClick={onClose}>
-            Close
-          </button>
-        </header>
-
-        <section className="card settings-session stack-md">
-          <header className="card-head">
-            <h3>Session Controls</h3>
-            <p className="compact-text muted status-mono">{sessionId ?? "no session"}</p>
-          </header>
-          <div className="control-row">
-            {!isRunning ? (
-              <button className="btn btn-primary" onClick={onStart}>
-                Start Listening
-              </button>
-            ) : (
-              <button className="btn btn-danger" onClick={onStop}>
-                Stop Listening
-              </button>
-            )}
-            <button className="btn" onClick={onResetMemory} disabled={!canResetMemory}>
-              Reset Memory
+      <button className="stitch-settings-backdrop" onClick={handleClose} aria-label="Close settings panel" tabIndex={-1} />
+      <aside
+        ref={dialogRef}
+        className="stitch-settings-drawer stitch-root"
+        role="dialog"
+        aria-modal="true"
+        aria-label="Voice settings and controls"
+        aria-labelledby="settings-drawer-title"
+        onKeyDown={handleDialogKeyDown}
+      >
+        <div className="stitch-settings-shell">
+          <header className="stitch-settings-header">
+            <h2 id="settings-drawer-title">Settings</h2>
+            <button ref={closeButtonRef} className="stitch-mini-btn is-neutral" type="button" onClick={handleClose}>
+              Close
             </button>
-            <button className="btn btn-quiet" onClick={onSignOut}>
+          </header>
+
+          <div className="stitch-settings-scroll">
+            <section className="stitch-settings-panel" aria-label="App connections">
+              <h3>App connections</h3>
+
+              <div className="stitch-settings-search">
+                <label htmlFor="settings-app-search">Search app or toolkit</label>
+                <input
+                  id="settings-app-search"
+                  className="stitch-settings-input"
+                  placeholder="Search app or toolkit"
+                  value={appsSearch}
+                  onChange={(event) => onAppsSearchChange(event.target.value)}
+                />
+              </div>
+
+              {loadingApps ? <p className="stitch-settings-hint">Loading integrations...</p> : null}
+              {!loadingApps && filteredItems.length === 0 ? <p className="stitch-settings-hint">No matching apps.</p> : null}
+
+              {STITCH_CATEGORY_ORDER.filter((categoryId) => groupedItems[categoryId].length > 0).map((categoryId, index) => (
+                <details key={categoryId} className="stitch-accordion" open={index === 0}>
+                  <summary>
+                    <span>{STITCH_CATEGORY_LABELS[categoryId]}</span>
+                    <span className="stitch-accordion-count">{groupedItems[categoryId].length}</span>
+                  </summary>
+
+                  <div className="stitch-accordion-content">
+                    {groupedItems[categoryId].map((item) => {
+                      const isConnecting = connectingAuthConfigId === item.authConfigId;
+                      return (
+                        <article key={item.authConfigId} className="stitch-integration-row">
+                          <StitchAppLogo slug={item.toolkitSlug} className="stitch-app-logo" alt={`${item.toolkitName} logo`} />
+                          <div className="stitch-card-body">
+                            <p className="stitch-card-title">{item.toolkitName}</p>
+                            <p className="stitch-card-subtitle">{item.name} • {item.authScheme ?? "oauth"}</p>
+                          </div>
+
+                          {item.isActive ? (
+                            <span className="stitch-connected-pill">Connected</span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="stitch-mini-btn is-primary"
+                              aria-label={isConnecting ? `Connecting ${item.toolkitName}` : `Connect ${item.toolkitName}`}
+                              onClick={() => onConnectApp(item.authConfigId)}
+                              disabled={isConnecting}
+                            >
+                              {isConnecting ? `Connecting ${item.toolkitName}` : `Connect ${item.toolkitName}`}
+                            </button>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                </details>
+              ))}
+            </section>
+
+            <details className="stitch-advanced" open={defaultSection === "timeline"}>
+              <summary>
+                <span>Advanced settings</span>
+                <span className="stitch-accordion-count">Optional</span>
+              </summary>
+
+              <div className="stitch-advanced-body">
+                <section className="stitch-settings-panel stitch-settings-panel-advanced">
+                  <div className="stitch-settings-panel-head">
+                    <h3>Session Controls</h3>
+                    <p className="stitch-settings-meta">{sessionId ?? "no session"}</p>
+                  </div>
+
+                  <div className="stitch-settings-actions">
+                    {!isRunning ? (
+                      <button className="stitch-mini-btn is-primary" type="button" onClick={onStart}>
+                        Start Listening
+                      </button>
+                    ) : (
+                      <button className="stitch-mini-btn is-danger" type="button" onClick={onStop}>
+                        Stop Listening
+                      </button>
+                    )}
+                    <button className="stitch-mini-btn is-neutral" type="button" onClick={onResetMemory} disabled={!canResetMemory}>
+                      Reset Memory
+                    </button>
+                  </div>
+
+                  <dl className="stitch-status-list">
+                    <div>
+                      <dt>Action</dt>
+                      <dd>{actionStatusMessage ?? "No action updates yet."}</dd>
+                    </div>
+                    <div>
+                      <dt>STT</dt>
+                      <dd>{sttMessage ?? "No status yet."}</dd>
+                    </div>
+                    <div>
+                      <dt>TTS Provider</dt>
+                      <dd>{activeTtsProvider ?? "none"}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section className="stitch-settings-panel stitch-settings-panel-advanced">
+                  <h3>Runtime Diagnostics</h3>
+                  <dl className="stitch-status-list">
+                    {providerDiagnostics.map((item) => (
+                      <div key={item.label}>
+                        <dt>{item.label}</dt>
+                        <dd>{item.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </section>
+
+                <section className="stitch-settings-panel stitch-settings-panel-advanced">
+                  <h3>Timeline</h3>
+                  <p className="stitch-settings-meta">{timelineSourceLabel}</p>
+                  {timelinePreview.length === 0 ? (
+                    <p className="stitch-settings-hint">No action events yet.</p>
+                  ) : (
+                    <ul className="stitch-timeline-list">
+                      {timelinePreview.map((item) => (
+                        <li key={item.id} className="stitch-timeline-item">
+                          <p className="stitch-timeline-type">{item.type}</p>
+                          <p className="stitch-timeline-message">{item.message}</p>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              </div>
+            </details>
+          </div>
+
+          <footer className="stitch-settings-footer">
+            <button className="stitch-settings-signout" type="button" onClick={onSignOut}>
               Sign Out
             </button>
-          </div>
-          <dl className="status-list compact-text">
-            <div>
-              <dt>Action</dt>
-              <dd>{actionStatusMessage ?? "No action updates yet."}</dd>
-            </div>
-            <div>
-              <dt>STT</dt>
-              <dd>{sttMessage ?? "No status yet."}</dd>
-            </div>
-            <div>
-              <dt>TTS provider</dt>
-              <dd>{activeTtsProvider ?? "none"}</dd>
-            </div>
-          </dl>
-        </section>
-
-        <section className="card stack-sm">
-          <header className="card-head">
-            <h3>Runtime Diagnostics</h3>
-          </header>
-          <dl className="status-list compact-text stack-sm">
-            {providerDiagnostics.map((item) => (
-              <div key={item.label}>
-                <dt>{item.label}</dt>
-                <dd>{item.value}</dd>
-              </div>
-            ))}
-          </dl>
-        </section>
-
-        <section className="settings-panel">
-          <h3>Connected Apps</h3>
-          <AppsTab
-            loading={loadingApps}
-            search={appsSearch}
-            onSearchChange={onAppsSearchChange}
-            items={appsItems}
-            connectingAuthConfigId={connectingAuthConfigId}
-            onConnect={onConnectApp}
-          />
-        </section>
-
-        <section className="settings-panel">
-          <h3>Timeline</h3>
-          <TimelineTab sourceLabel={timelineSourceLabel} items={timelineItems} />
-        </section>
+          </footer>
+        </div>
       </aside>
     </>
   );

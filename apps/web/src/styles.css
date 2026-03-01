@@ -1049,3 +1049,8 @@ summary:focus-visible,
     transform: none !important;
   }
 }
+
+/* Dedicated namespace root for isolated Stitch previews. */
+.stitch-root {
+  isolation: isolate;
+}

@@ -8,20 +8,34 @@ type ActionNotificationLaneProps = {
   pendingAction: ActionDraft | null;
   onApprovePending: () => void;
   onRejectPending: () => void;
+  onViewAll: () => void;
 };
 
 export function ActionNotificationLane({
   notifications,
   pendingAction,
   onApprovePending,
-  onRejectPending
+  onRejectPending,
+  onViewAll
 }: ActionNotificationLaneProps) {
-  if (notifications.length === 0) {
-    return null;
-  }
+  const hasNotifications = notifications.length > 0;
 
   return (
-    <aside className="task-lane" aria-label="Task notifications">
+    <aside className={`task-lane ${hasNotifications ? "" : "is-empty-lane"}`} aria-label="Task notifications">
+      <header className="task-lane-head">
+        <h2>Recent Activity</h2>
+        <button type="button" className="task-lane-view-all" onClick={onViewAll}>
+          View all
+        </button>
+      </header>
+
+      {!hasNotifications ? (
+        <article className="task-empty-state" aria-live="polite">
+          <p className="task-empty-title">No recent actions yet.</p>
+          <p className="task-empty-message">Speak to generate your first activity item.</p>
+        </article>
+      ) : null}
+
       {notifications.map((notification) => {
         const showApprovalControls =
           !!pendingAction &&

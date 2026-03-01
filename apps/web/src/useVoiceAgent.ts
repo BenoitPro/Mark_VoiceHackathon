@@ -25,6 +25,7 @@ import {
 } from "@mark/contracts";
 
 import { MicrophonePipeline } from "./audio";
+import { buildApiUrl, buildSocketNamespaceUrl, normalizeApiBaseUrl } from "./apiBaseUrl";
 import { encodePcmChunksToMp3Base64 } from "./mp3";
 import { StreamingTtsPlayer } from "./ttsPlayer";
 import { WaitingCuePlayer } from "./waitingCue";
@@ -56,6 +57,7 @@ export type ActionTimelineItem = {
 type VoiceAgentState = {
   connected: boolean;
   voiceState: VoiceState;
+  isMicMuted: boolean;
   sttStatus: SttStatusEvent | null;
   userPartial: string;
   userFinal: string;
@@ -75,6 +77,7 @@ type VoiceAgentState = {
 type VoiceAgentApi = VoiceAgentState & {
   start: () => Promise<void>;
   stop: () => Promise<void>;
+  toggleMic: () => void;
   resetMemory: () => void;
   approvePending: () => void;
   rejectPending: (reason?: string) => void;
@@ -87,11 +90,12 @@ const SILENCE_COMMIT_MS = 900;
 const SAMPLE_RATE: 16000 = 16000;
 const PRE_ROLL_CHUNKS = 4;
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 
 export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken: string | null): VoiceAgentApi {
   const [connected, setConnected] = useState(false);
   const [voiceState, setVoiceState] = useState<VoiceState>("idle");
+  const [isMicMuted, setIsMicMuted] = useState(false);
   const [sttStatus, setSttStatus] = useState<SttStatusEvent | null>(null);
   const [userPartial, setUserPartial] = useState("");
   const [userFinal, setUserFinal] = useState("");
@@ -112,6 +116,8 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
   const playerRef = useRef<StreamingTtsPlayer | null>(null);
   const waitingCueRef = useRef<WaitingCuePlayer | null>(null);
   const voiceStateRef = useRef<VoiceState>("idle");
+  const micMutedRef = useRef(false);
+  const autoStartAttemptedRef = useRef(false);
   const smoothedLevelRef = useRef(0);
   const lastVoiceAtRef = useRef(0);
   const awaitingCommitRef = useRef(false);
@@ -123,6 +129,11 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
   const setVoiceStateSafe = (next: VoiceState): void => {
     voiceStateRef.current = next;
     setVoiceState(next);
+  };
+
+  const setMicMutedSafe = (next: boolean): void => {
+    micMutedRef.current = next;
+    setIsMicMuted(next);
   };
 
   const pushTimeline = (
@@ -150,7 +161,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
   }, [voiceState]);
 
   useEffect(() => {
-    void fetch(`${API_BASE_URL}/health/voice`)
+    void fetch(buildApiUrl(API_BASE_URL, "/health/voice"))
       .then((response) => response.json())
       .then((data: VoiceHealth) => {
         setHealth(data);
@@ -220,7 +231,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
       return;
     }
 
-    const socket = io(`${API_BASE_URL}/v1/session`, {
+    const socket = io(buildSocketNamespaceUrl(API_BASE_URL, "/v1/session"), {
       transports: ["websocket"],
       auth: {
         accessToken,
@@ -368,6 +379,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     }
 
     setError(null);
+    setMicMutedSafe(false);
     connectSocket();
 
     const mic = new MicrophonePipeline(({ pcm16, rms }) => {
@@ -381,15 +393,19 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
         return;
       }
 
-      smoothedLevelRef.current = smoothedLevelRef.current * 0.3 + rms * 0.7;
+      const isMuted = micMutedRef.current;
+      const effectiveRms = isMuted ? 0 : rms;
+      smoothedLevelRef.current = isMuted ? 0 : smoothedLevelRef.current * 0.3 + rms * 0.7;
       setAudioLevel(smoothedLevelRef.current);
       const chunkCopy = new Int16Array(pcm16);
-      appendPreRoll(chunkCopy, preRollRef.current);
+      if (!isMuted) {
+        appendPreRoll(chunkCopy, preRollRef.current);
+      }
 
       const now = Date.now();
       const isInterruptMode = currentState === "speaking";
       const threshold = isInterruptMode ? INTERRUPT_THRESHOLD : SILENCE_THRESHOLD;
-      const hasVoice = smoothedLevelRef.current > threshold;
+      const hasVoice = effectiveRms > threshold;
 
       if (hasVoice) {
         if (!speechDetectedRef.current) {
@@ -405,7 +421,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
         awaitingCommitRef.current = true;
       }
 
-      if (speechDetectedRef.current) {
+      if (speechDetectedRef.current && !isMuted) {
         utteranceChunksRef.current.push(chunkCopy);
       }
 
@@ -460,6 +476,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
 
   const stop = async (): Promise<void> => {
     setIsRunning(false);
+    setMicMutedSafe(false);
     setAudioLevel(0);
     awaitingCommitRef.current = false;
     smoothedLevelRef.current = 0;
@@ -481,6 +498,35 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     setActiveTtsProvider(null);
     disconnectSocket();
     setVoiceStateSafe("idle");
+  };
+
+  const toggleMic = (): void => {
+    if (!isRunning) {
+      void start();
+      return;
+    }
+
+    const next = !micMutedRef.current;
+    setMicMutedSafe(next);
+    smoothedLevelRef.current = 0;
+    setAudioLevel(0);
+    preRollRef.current = [];
+
+    if (next) {
+      setSttStatus({
+        code: "mic_inactive",
+        message: "Microphone muted. Tap again to resume listening."
+      });
+      if (voiceStateRef.current !== "speaking") {
+        setVoiceStateSafe("listening");
+      }
+      return;
+    }
+
+    setSttStatus({
+      code: "listening",
+      message: "Listening for your request."
+    });
   };
 
   const resetMemory = (): void => {
@@ -536,13 +582,27 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     if (!accessToken && isRunning) {
       void stop();
     }
+    if (!accessToken) {
+      autoStartAttemptedRef.current = false;
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [accessToken]);
+
+  useEffect(() => {
+    if (!accessToken || isRunning || autoStartAttemptedRef.current) {
+      return;
+    }
+
+    autoStartAttemptedRef.current = true;
+    void start();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessToken, isRunning]);
 
   return useMemo(
     () => ({
       connected,
       voiceState,
+      isMicMuted,
       sttStatus,
       userPartial,
       userFinal,
@@ -559,6 +619,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
       activeTtsProvider,
       start,
       stop,
+      toggleMic,
       resetMemory,
       approvePending,
       rejectPending
@@ -566,6 +627,7 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
     [
       connected,
       voiceState,
+      isMicMuted,
       sttStatus,
       userPartial,
       userFinal,

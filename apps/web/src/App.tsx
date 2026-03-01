@@ -10,15 +10,15 @@ import type {
 } from "@mark/contracts";
 
 import { StatusAlerts } from "./components/StatusAlerts";
-import { TopBar } from "./components/TopBar";
 import type { ProviderDiagnosticItem } from "./components/types";
 import { VoiceStage } from "./components/VoiceStage";
+import { buildApiUrl, normalizeApiBaseUrl } from "./apiBaseUrl";
 import { supabase } from "./supabase";
 import type { CatalogListItem } from "./tabs/AppsTab";
 import type { TimelineViewItem } from "./tabs/TimelineTab";
 import { useVoiceAgent } from "./useVoiceAgent";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
+const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -151,6 +151,7 @@ export function App() {
       const isActive = connection?.status.toUpperCase() === "ACTIVE";
       return {
         authConfigId: item.authConfigId,
+        toolkitSlug: item.toolkitSlug,
         toolkitName: item.toolkitName,
         name: item.name,
         authScheme: item.authScheme,
@@ -280,40 +281,40 @@ export function App() {
     <div className="page">
       <main className="shell">
         {!session ? (
-          <>
-            <TopBar
-              session={session}
-              userEmail={user?.email ?? null}
-              onSignIn={() => {
-                void signInWithGoogle();
-              }}
-              onSignOut={() => {
-                void signOut();
-              }}
-            />
-            <section className="auth-guard card">
+          <section className="stitch-root stitch-phone-shell stitch-auth-shell" aria-label="Authentication required">
+            <div className="stitch-ambient-fluid-border stitch-ambient-fluid-border-strong" aria-hidden />
+
+            <header className="stitch-header stitch-auth-header">
+              <div className="stitch-auth-brand">
+                <p className="stitch-auth-eyebrow">Mark Agent</p>
+                <h1>Voice Assistant</h1>
+              </div>
+            </header>
+
+            <section className="stitch-auth-body">
               <h2>Authentication Required</h2>
               <p>
                 Sign in to unlock voice actions, app connections, and approval-gated execution. Voice loops remain protected
                 by Supabase access tokens.
               </p>
               <button
-                className="btn btn-primary"
+                className="stitch-auth-cta"
                 onClick={() => {
                   void signInWithGoogle();
                 }}
               >
                 Continue With Google
               </button>
-              {!supabase ? <p className="alert alert-error">Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`.</p> : null}
+              {!supabase ? <p className="stitch-auth-error">Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`.</p> : null}
             </section>
-          </>
+          </section>
         ) : (
           <>
             <StatusAlerts connectedBanner={connectedBanner} errorMessage={agent.error ?? error} />
             <VoiceStage
               connected={agent.connected}
               isRunning={agent.isRunning}
+              isMicMuted={agent.isMicMuted}
               voiceState={agent.voiceState}
               audioLevel={agent.audioLevel}
               sessionId={agent.sessionId}
@@ -334,6 +335,7 @@ export function App() {
               onStop={() => {
                 void agent.stop();
               }}
+              onToggleMic={agent.toggleMic}
               onResetMemory={agent.resetMemory}
               onSignOut={() => {
                 void signOut();
@@ -392,7 +394,7 @@ export function App() {
 }
 
 async function authedFetch<T>(path: string, accessToken: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
+  const response = await fetch(buildApiUrl(API_BASE_URL, path), {
     ...init,
     headers: {
       authorization: `Bearer ${accessToken}`,

@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Confluence">
+  <rect width="24" height="24" rx="6" fill="#0052cc"/>
+  <path d="M6 8.2C7.8 9.9 9.5 10.6 12 10.6C14.5 10.6 16.2 9.9 18 8.2" fill="none" stroke="#ffffff" stroke-width="2" stroke-linecap="round"/>
+  <path d="M6 15.8C7.8 14.1 9.5 13.4 12 13.4C14.5 13.4 16.2 14.1 18 15.8" fill="none" stroke="#b3d4ff" stroke-width="2" stroke-linecap="round"/>
+</svg>

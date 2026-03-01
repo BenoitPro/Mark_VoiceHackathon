@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import type { ComponentProps } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -30,20 +30,67 @@ const pendingAction: ActionDraft = {
 };
 
 describe("VoiceStage", () => {
-  it("calls stop when top-left close button is pressed", async () => {
+  it("starts listening when microphone control is pressed while idle", async () => {
     const user = userEvent.setup();
-    const onStop = vi.fn();
+    const onStart = vi.fn();
+
+    render(
+      <VoiceStage
+        {...createBaseProps()}
+        isRunning={false}
+        onStart={onStart}
+      />
+    );
+
+    const control = screen.getByRole("button", { name: "Start listening" });
+    expect(control).not.toHaveTextContent("Start listening");
+    await user.click(control);
+    expect(onStart).toHaveBeenCalledTimes(1);
+  });
+
+  it("toggles microphone mute when control is pressed while running", async () => {
+    const user = userEvent.setup();
+    const onToggleMic = vi.fn();
 
     render(
       <VoiceStage
         {...createBaseProps()}
         isRunning
-        onStop={onStop}
+        voiceState="listening"
+        onToggleMic={onToggleMic}
       />
     );
 
-    await user.click(screen.getByRole("button", { name: "Stop voice session" }));
-    expect(onStop).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Mute microphone" }));
+    expect(onToggleMic).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders muted state when microphone is muted", () => {
+    render(
+      <VoiceStage
+        {...createBaseProps()}
+        isRunning
+        isMicMuted
+      />
+    );
+
+    const control = screen.getByRole("button", { name: "Unmute microphone" });
+    expect(control.className).toContain("is-muted");
+    expect(control).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("renders live state when microphone is active", () => {
+    render(
+      <VoiceStage
+        {...createBaseProps()}
+        isRunning
+        isMicMuted={false}
+      />
+    );
+
+    const control = screen.getByRole("button", { name: "Mute microphone" });
+    expect(control.className).toContain("is-live");
+    expect(control).toHaveAttribute("aria-pressed", "false");
   });
 
   it("opens and closes settings drawer", async () => {
@@ -52,10 +99,13 @@ describe("VoiceStage", () => {
     render(<VoiceStage {...createBaseProps()} />);
     await user.click(screen.getByRole("button", { name: "Settings" }));
 
-    expect(screen.getByRole("heading", { name: "Session Controls" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Settings" })).toBeInTheDocument();
+    const advancedSettings = screen.getByText("Advanced settings").closest("details");
+    expect(advancedSettings).not.toBeNull();
+    expect(advancedSettings).not.toHaveAttribute("open");
 
     await user.click(screen.getByRole("button", { name: "Close" }));
-    expect(screen.queryByRole("heading", { name: "Session Controls" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
   });
 
   it("renders approval actions for pending notifications and handles clicks", async () => {
@@ -85,8 +135,82 @@ describe("VoiceStage", () => {
     await user.click(await screen.findByRole("button", { name: "Approve" }));
     await user.click(screen.getByRole("button", { name: "Reject" }));
 
+    expect(screen.getByRole("heading", { name: "Recent Activity" })).toBeInTheDocument();
     expect(onApprovePending).toHaveBeenCalledTimes(1);
     expect(onRejectPending).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not render the legacy voice core orb", () => {
+    render(<VoiceStage {...createBaseProps()} />);
+
+    expect(screen.queryByRole("img", { name: /Voice state:/i })).not.toBeInTheDocument();
+  });
+
+  it("uses stitch transcript fallback when no live transcript is available", () => {
+    render(<VoiceStage {...createBaseProps()} />);
+
+    expect(screen.getByRole("heading", { name: "Recent Activity" })).toBeInTheDocument();
+    expect(screen.getByText(/Draft a brief follow-up email to the engineering team/i)).toBeInTheDocument();
+  });
+
+  it("shows an activity empty state when there are no live notifications", () => {
+    render(<VoiceStage {...createBaseProps()} />);
+
+    expect(screen.getByText("No recent actions yet.")).toBeInTheDocument();
+    expect(screen.getByText(/Speak to generate your first activity item./i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "View all" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
+  });
+
+  it("opens the notifications page when View all is pressed", async () => {
+    const user = userEvent.setup();
+
+    render(
+      <VoiceStage
+        {...createBaseProps()}
+        actionTimeline={[
+          {
+            id: "timeline-1",
+            actionId: "action-1",
+            revisionId: "revision-1",
+            type: "action.executed",
+            message: "Sent follow-up email.",
+            createdAt: "2026-03-01T10:00:00.000Z"
+          }
+        ]}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "View all" }));
+
+    expect(screen.queryByRole("heading", { name: "Settings" })).not.toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Notifications" })).toBeInTheDocument();
+    expect(await screen.findByText("Sent follow-up email.")).toBeInTheDocument();
+  });
+
+  it("shows an empty notifications page when View all is pressed with no notifications", async () => {
+    const user = userEvent.setup();
+
+    render(<VoiceStage {...createBaseProps()} />);
+
+    await user.click(screen.getByRole("button", { name: "View all" }));
+
+    expect(screen.getByRole("heading", { name: "Notifications" })).toBeInTheDocument();
+    expect(screen.getByText("No notifications yet.")).toBeInTheDocument();
+    expect(screen.getByText(/When actions happen, they will appear here./i)).toBeInTheDocument();
+  });
+
+  it("restores focus to the Settings trigger after closing the drawer", async () => {
+    const user = userEvent.setup();
+
+    render(<VoiceStage {...createBaseProps()} />);
+    const settingsButton = screen.getByRole("button", { name: "Settings" });
+    await user.click(settingsButton);
+    await user.click(screen.getByRole("button", { name: "Close" }));
+
+    await waitFor(() => {
+      expect(settingsButton).toHaveFocus();
+    });
   });
 
   it("prioritizes partial transcript in the stage caption", () => {
@@ -123,6 +247,8 @@ function createBaseProps(): ComponentProps<typeof VoiceStage> {
     providerDiagnostics: diagnostics,
     onStart: vi.fn(),
     onStop: vi.fn(),
+    isMicMuted: false,
+    onToggleMic: vi.fn(),
     onResetMemory: vi.fn(),
     onSignOut: vi.fn(),
     onApprovePending: vi.fn(),
