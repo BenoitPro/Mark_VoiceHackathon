@@ -70,7 +70,10 @@ const EVENT_LABELS: Record<string, string> = {
   "placeholder.notes": "TechCorp Demo Prep",
   "placeholder.sync": "Weekly sync prepared",
   "placeholder.brief": "Client brief queued",
-  "placeholder.budget": "Budget review pending"
+  "placeholder.budget": "Budget review pending",
+  "placeholder.slack_manager": "Slack from your manager",
+  "placeholder.linkedin_client": "LinkedIn client message",
+  "placeholder.email_deal": "Big deal email"
 };
 
 function resolveLogoSlug(platformLabel: string): string {

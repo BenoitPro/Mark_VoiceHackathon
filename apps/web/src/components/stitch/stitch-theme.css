@@ -412,6 +412,25 @@
   z-index: 2;
 }
 
+.voice-stage.stitch-phone-shell .stitch-start-blocked {
+  position: relative;
+  z-index: 2;
+  margin: 0.15rem 0.5rem 0;
+  padding: 0.56rem 0.62rem;
+  border-radius: 12px;
+  border: 1px solid rgba(189, 207, 236, 0.95);
+  background: rgba(246, 250, 255, 0.92);
+  display: grid;
+  gap: 0.45rem;
+}
+
+.voice-stage.stitch-phone-shell .stitch-start-blocked p {
+  margin: 0;
+  color: #3f5776;
+  font-size: 0.77rem;
+  line-height: 1.35;
+}
+
 .voice-stage.stitch-phone-shell .stitch-notifications-page {
   position: relative;
   z-index: 2;

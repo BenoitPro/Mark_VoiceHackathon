@@ -4,9 +4,12 @@ import type { Session } from "@supabase/supabase-js";
 import type {
   ActionHistoryItem,
   AuthMeResponse,
+  BillingCheckoutResponse,
+  BillingStatusResponse,
   ComposioCatalogItem,
   ComposioConnectionItem,
-  ComposioConnectLinkResponse
+  ComposioConnectLinkResponse,
+  TelemetryEventName
 } from "@mark/contracts";
 
 import { StatusAlerts } from "./components/StatusAlerts";
@@ -19,6 +22,10 @@ import type { TimelineViewItem } from "./tabs/TimelineTab";
 import { useVoiceAgent } from "./useVoiceAgent";
 
 const API_BASE_URL = normalizeApiBaseUrl(import.meta.env.VITE_API_BASE_URL);
+const MARKETING_CHECKOUT_URL =
+  typeof import.meta.env.VITE_STRIPE_CHECKOUT_URL === "string" && import.meta.env.VITE_STRIPE_CHECKOUT_URL.trim().length > 0
+    ? import.meta.env.VITE_STRIPE_CHECKOUT_URL.trim()
+    : null;
 
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
@@ -26,6 +33,7 @@ export function App() {
   const [catalog, setCatalog] = useState<ComposioCatalogItem[]>([]);
   const [connections, setConnections] = useState<ComposioConnectionItem[]>([]);
   const [history, setHistory] = useState<ActionHistoryItem[]>([]);
+  const [billing, setBilling] = useState<BillingStatusResponse | null>(null);
   const [catalogSearch, setCatalogSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
@@ -35,6 +43,11 @@ export function App() {
 
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const accessToken = session?.access_token ?? null;
+
+  const hasTrackedVisitRef = useRef(false);
+  const hasTrackedSignupRef = useRef(false);
+  const hasTrackedGmailConnectedRef = useRef(false);
+  const hasTrackedFirstTriageRef = useRef(false);
 
   const agent = useVoiceAgent(audioRef.current, accessToken);
 
@@ -74,11 +87,22 @@ export function App() {
   }, []);
 
   useEffect(() => {
+    if (hasTrackedVisitRef.current) {
+      return;
+    }
+    hasTrackedVisitRef.current = true;
+    void trackTelemetry("visit", null, {
+      source: "web"
+    });
+  }, []);
+
+  useEffect(() => {
     if (!accessToken) {
       setUser(null);
       setCatalog([]);
       setConnections([]);
       setHistory([]);
+      setBilling(null);
       return;
     }
 
@@ -103,6 +127,46 @@ export function App() {
     }, 15_000);
     return () => window.clearInterval(interval);
   }, [accessToken]);
+
+  const isGmailConnected = useMemo(() => {
+    return connections.some((connection) => {
+      return connection.toolkitSlug.toLowerCase() === "gmail" && connection.status.toUpperCase() === "ACTIVE";
+    });
+  }, [connections]);
+
+  useEffect(() => {
+    if (!accessToken || hasTrackedSignupRef.current) {
+      return;
+    }
+    hasTrackedSignupRef.current = true;
+    void trackTelemetry("signup", accessToken, {
+      hasSession: true
+    });
+  }, [accessToken]);
+
+  useEffect(() => {
+    if (!accessToken || !isGmailConnected || hasTrackedGmailConnectedRef.current) {
+      return;
+    }
+    hasTrackedGmailConnectedRef.current = true;
+    void trackTelemetry("gmail_connected", accessToken, {
+      source: "app_connections"
+    });
+  }, [accessToken, isGmailConnected]);
+
+  useEffect(() => {
+    if (!accessToken || hasTrackedFirstTriageRef.current) {
+      return;
+    }
+    if (!/\bi scanned\b/i.test(agent.agentFinal) || !/\bunread inbox emails\b/i.test(agent.agentFinal)) {
+      return;
+    }
+
+    hasTrackedFirstTriageRef.current = true;
+    void trackTelemetry("first_triage", accessToken, {
+      source: "voice"
+    });
+  }, [accessToken, agent.agentFinal]);
 
   const filteredCatalog = useMemo(() => {
     const needle = catalogSearch.trim().toLowerCase();
@@ -220,6 +284,30 @@ export function App() {
     ];
   }, [agent.health]);
 
+  const onboardingSteps = useMemo(() => {
+    return [
+      {
+        id: "signin",
+        label: "Sign in with Google",
+        done: Boolean(session)
+      },
+      {
+        id: "connect",
+        label: "Connect Gmail",
+        done: isGmailConnected
+      },
+      {
+        id: "voice",
+        label: "Run first voice triage",
+        done: agent.actionTimeline.length > 0 || /\bi scanned\b/i.test(agent.agentFinal)
+      }
+    ];
+  }, [agent.actionTimeline.length, agent.agentFinal, isGmailConnected, session]);
+
+  const startBlockedReason = !isGmailConnected
+    ? "Connect an active Gmail integration before starting voice triage."
+    : null;
+
   const signInWithGoogle = async (): Promise<void> => {
     if (!supabase) {
       setError("Supabase is not configured in the web app.");
@@ -277,40 +365,125 @@ export function App() {
     }
   };
 
+  const startCheckout = async (): Promise<void> => {
+    if (accessToken) {
+      try {
+        const payload = await authedFetch<BillingCheckoutResponse>("/v1/billing/checkout-link", accessToken, {
+          method: "POST"
+        });
+        void trackTelemetry("checkout_clicked", accessToken, {
+          source: "authed"
+        });
+        window.open(payload.checkoutUrl, "_blank", "noopener,noreferrer");
+        return;
+      } catch (err) {
+        setError(toErrorMessage(err));
+      }
+    }
+
+    if (MARKETING_CHECKOUT_URL) {
+      void trackTelemetry("checkout_clicked", accessToken, {
+        source: "landing"
+      });
+      window.open(MARKETING_CHECKOUT_URL, "_blank", "noopener,noreferrer");
+      return;
+    }
+
+    setError("Checkout is not configured yet.");
+  };
+
   return (
     <div className="page">
       <main className="shell">
         {!session ? (
-          <section className="stitch-root stitch-phone-shell stitch-auth-shell" aria-label="Authentication required">
-            <div className="stitch-ambient-fluid-border stitch-ambient-fluid-border-strong" aria-hidden />
-
-            <header className="stitch-header stitch-auth-header">
-              <div className="stitch-auth-brand">
-                <p className="stitch-auth-eyebrow">Mark Agent</p>
-                <h1>Voice Assistant</h1>
+          <section className="landing-shell" aria-label="Mark Gmail voice triage landing">
+            <header className="landing-hero card">
+              <p className="eyebrow">Gmail triage voice-first</p>
+              <h1>Inbox cleared by voice in minutes.</h1>
+              <p className="muted">
+                Mark listens, triages unread Gmail, drafts replies, and asks approval before any send action.
+              </p>
+              <div className="landing-cta-row">
+                <button
+                  className="btn btn-primary"
+                  onClick={() => {
+                    void signInWithGoogle();
+                  }}
+                >
+                  Continue with Google
+                </button>
+                <button className="btn" onClick={() => void startCheckout()}>
+                  Buy now
+                </button>
               </div>
             </header>
 
-            <section className="stitch-auth-body">
-              <h2>Authentication Required</h2>
-              <p>
-                Sign in to unlock voice actions, app connections, and approval-gated execution. Voice loops remain protected
-                by Supabase access tokens.
-              </p>
-              <button
-                className="stitch-auth-cta"
-                onClick={() => {
-                  void signInWithGoogle();
-                }}
-              >
-                Continue With Google
-              </button>
-              {!supabase ? <p className="stitch-auth-error">Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`.</p> : null}
+            <section className="landing-grid">
+              <article className="card">
+                <h2>How it works</h2>
+                <ol className="landing-list">
+                  <li>Connect Gmail once</li>
+                  <li>Ask for inbox triage by voice</li>
+                  <li>Approve replies before send</li>
+                </ol>
+              </article>
+
+              <article className="card">
+                <h2>Pricing</h2>
+                <p><strong>Starter:</strong> Trial with core triage workflow</p>
+                <p><strong>Pro:</strong> Paid plan with production support and priority fixes</p>
+              </article>
+
+              <article className="card">
+                <h2>FAQ</h2>
+                <p><strong>Will Mark auto-send without me?</strong> No. Mutating actions stay approval-gated.</p>
+                <p><strong>Can I use it from mobile?</strong> Yes, the interface is mobile-first.</p>
+              </article>
             </section>
+
+            {!supabase ? <p className="stitch-auth-error">Missing `VITE_SUPABASE_URL` or `VITE_SUPABASE_ANON_KEY`.</p> : null}
+            <StatusAlerts connectedBanner={connectedBanner} errorMessage={error} />
           </section>
         ) : (
           <>
-            <StatusAlerts connectedBanner={connectedBanner} errorMessage={agent.error ?? error} />
+            <section className="card onboarding-strip" aria-label="Onboarding checklist">
+              <p className="eyebrow">Onboarding</p>
+              <h2>Get to first value fast</h2>
+              <ul className="onboarding-list">
+                {onboardingSteps.map((step) => (
+                  <li key={step.id} className={step.done ? "is-done" : ""}>
+                    <span>{step.done ? "Done" : "Pending"}</span>
+                    <span>{step.label}</span>
+                  </li>
+                ))}
+              </ul>
+            </section>
+
+            <section className="card billing-strip" aria-label="Billing status">
+              <p>
+                Plan: <strong>{billing?.plan ?? "trial"}</strong>
+              </p>
+              {billing?.plan !== "paid" ? (
+                <button className="btn btn-primary btn-compact" type="button" onClick={() => void startCheckout()}>
+                  Upgrade with Stripe
+                </button>
+              ) : (
+                <p className="muted">Paid plan active</p>
+              )}
+            </section>
+
+            <StatusAlerts
+              connectedBanner={connectedBanner}
+              errorMessage={agent.error ?? error}
+              onRetry={
+                accessToken
+                  ? () => {
+                      void refreshAuthedData(accessToken);
+                    }
+                  : null
+              }
+              retryLabel="Retry loading"
+            />
             <VoiceStage
               connected={agent.connected}
               isRunning={agent.isRunning}
@@ -329,6 +502,7 @@ export function App() {
               actionStatusMessage={agent.actionStatus?.message ?? null}
               activeTtsProvider={agent.activeTtsProvider}
               providerDiagnostics={providerDiagnostics}
+              startBlockedReason={startBlockedReason}
               onStart={() => {
                 void agent.start();
               }}
@@ -365,17 +539,19 @@ export function App() {
     setLoadingCatalog(true);
     setError(null);
     try {
-      const [me, nextCatalog, nextConnections, nextHistory] = await Promise.all([
+      const [me, nextCatalog, nextConnections, nextHistory, nextBilling] = await Promise.all([
         authedFetch<AuthMeResponse>("/v1/auth/me", token),
         authedFetch<ComposioCatalogItem[]>("/v1/composio/catalog", token),
         authedFetch<ComposioConnectionItem[]>("/v1/composio/connections", token),
-        authedFetch<{ items: ActionHistoryItem[] }>("/v1/actions/history", token)
+        authedFetch<{ items: ActionHistoryItem[] }>("/v1/actions/history", token),
+        authedFetch<BillingStatusResponse>("/v1/billing/status", token)
       ]);
 
       setUser(me);
       setCatalog(nextCatalog);
       setConnections(nextConnections);
       setHistory(nextHistory.items);
+      setBilling(nextBilling);
     } catch (err) {
       setError(toErrorMessage(err));
     } finally {
@@ -406,6 +582,21 @@ async function authedFetch<T>(path: string, accessToken: string, init?: RequestI
     throw new Error(text || `Request failed with status ${response.status}`);
   }
   return (await response.json()) as T;
+}
+
+async function trackTelemetry(
+  event: TelemetryEventName,
+  accessToken: string | null,
+  metadata?: Record<string, unknown>
+): Promise<void> {
+  await fetch(buildApiUrl(API_BASE_URL, "/v1/telemetry/events"), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {})
+    },
+    body: JSON.stringify({ event, metadata })
+  }).catch(() => undefined);
 }
 
 function summarizePayload(payload: Record<string, unknown>): string {

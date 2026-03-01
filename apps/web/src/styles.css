@@ -1054,3 +1054,75 @@ summary:focus-visible,
 .stitch-root {
   isolation: isolate;
 }
+
+.landing-shell {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.landing-hero {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.landing-cta-row {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.landing-grid {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.landing-list {
+  margin: 0;
+  padding-left: 1.1rem;
+  display: grid;
+  gap: 0.25rem;
+}
+
+.onboarding-strip {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.onboarding-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.onboarding-list li {
+  display: grid;
+  grid-template-columns: minmax(5.4rem, auto) 1fr;
+  align-items: center;
+  gap: 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.42rem 0.55rem;
+  background: var(--surface-subtle);
+}
+
+.onboarding-list li.is-done {
+  border-color: #97ddb6;
+  background: #eafbf1;
+}
+
+.onboarding-list li span:first-child {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 0.73rem;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.billing-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}

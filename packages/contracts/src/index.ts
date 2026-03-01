@@ -77,6 +77,9 @@ export interface SttStatusEvent {
 
 export interface ErrorRaisedEvent {
   message: string;
+  code?: string;
+  retryable?: boolean;
+  correlationId?: string;
 }
 
 export interface SessionResetEvent {
@@ -175,6 +178,25 @@ export interface ActionHistoryItem {
 
 export interface ActionHistoryResponse {
   items: ActionHistoryItem[];
+}
+
+export type BillingPlan = "trial" | "paid";
+
+export interface BillingStatusResponse {
+  plan: BillingPlan;
+  checkoutConfigured: boolean;
+  checkoutUrl: string | null;
+}
+
+export interface BillingCheckoutResponse {
+  checkoutUrl: string;
+}
+
+export type TelemetryEventName = "visit" | "signup" | "gmail_connected" | "first_triage" | "checkout_clicked";
+
+export interface TelemetryEventRequest {
+  event: TelemetryEventName;
+  metadata?: Record<string, unknown>;
 }
 
 export const WS_EVENTS = {

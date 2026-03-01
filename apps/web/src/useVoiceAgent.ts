@@ -13,6 +13,7 @@ import {
   type ActionRevisedEvent,
   type ActionStatusEvent,
   type AgentReplyEvent,
+  type ErrorRaisedEvent,
   type AudioUserUtteranceEvent,
   type SessionStartedEvent,
   type SttStatusEvent,
@@ -349,8 +350,9 @@ export function useVoiceAgent(audioElement: HTMLAudioElement | null, accessToken
       setError(payload.message);
     });
 
-    socket.on(WS_EVENTS.ERROR_RAISED, (payload: { message: string }) => {
-      setError(payload.message);
+    socket.on(WS_EVENTS.ERROR_RAISED, (payload: ErrorRaisedEvent) => {
+      const suffix = payload.correlationId ? ` (${payload.correlationId})` : "";
+      setError(`${payload.message}${suffix}`);
       if (voiceStateRef.current !== "speaking") {
         setVoiceStateSafe("idle");
       }

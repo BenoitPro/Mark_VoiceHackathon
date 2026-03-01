@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Composio, type Tool } from "@composio/core";
 
 import type { EnvConfig } from "./env.js";
+import { CircuitBreaker, isRetriableError, withRetries } from "./reliability.js";
 
 export type ComposioCatalogItem = {
   authConfigId: string;
@@ -36,8 +37,13 @@ type ToolByName = Record<string, AgentToolDefinition>;
 
 export class ComposioService {
   private readonly client: Composio | null;
+  private readonly breaker: CircuitBreaker;
 
   constructor(private readonly env: EnvConfig) {
+    this.breaker = new CircuitBreaker({
+      failureThreshold: env.providerCircuitBreakerFailures,
+      cooldownMs: env.providerCircuitBreakerCooldownMs
+    });
     if (!env.composioApiKey) {
       this.client = null;
       return;
@@ -58,7 +64,7 @@ export class ComposioService {
       return [];
     }
 
-    const response = await this.client.authConfigs.list();
+    const response = await this.runWithResilience(() => this.client!.authConfigs.list());
     const items = asArray((response as { items?: unknown[] }).items);
     const authConfigCatalog = items
       .map((item) => asCatalogItem(item))
@@ -70,7 +76,7 @@ export class ComposioService {
     }
 
     // Fallback: workspace may rely on managed toolkit authorization without explicit auth configs.
-    const toolkitsResponse = await (this.client.toolkits as any).getToolkits({ limit: 400 });
+    const toolkitsResponse = await this.runWithResilience(() => (this.client!.toolkits as any).getToolkits({ limit: 400 }));
     const toolkitItems = asArray(toolkitsResponse);
     return toolkitItems
       .map((item) => asToolkitCatalogItem(item))
@@ -92,7 +98,9 @@ export class ComposioService {
         throw new Error("Invalid toolkit connection identifier.");
       }
 
-      const toolkitRequest = await this.client.toolkits.authorize(composioUserId, toolkitSlug);
+      const toolkitRequest = await this.runWithResilience(() =>
+        this.client!.toolkits.authorize(composioUserId, toolkitSlug)
+      );
       const toolkitRedirectUrl = readStringValue(toolkitRequest, "redirectUrl");
       if (!toolkitRedirectUrl) {
         throw new Error("Composio toolkit authorization did not return a redirect URL.");
@@ -104,9 +112,11 @@ export class ComposioService {
       };
     }
 
-    const request = await this.client.connectedAccounts.link(composioUserId, authConfigId, {
-      callbackUrl: this.env.composioConnectCallbackUrl
-    });
+    const request = await this.runWithResilience(() =>
+      this.client!.connectedAccounts.link(composioUserId, authConfigId, {
+        callbackUrl: this.env.composioConnectCallbackUrl
+      })
+    );
 
     const redirectUrl = readStringValue(request, "redirectUrl");
     if (!redirectUrl) {
@@ -123,7 +133,7 @@ export class ComposioService {
     if (!this.client) {
       return;
     }
-    await this.client.connectedAccounts.waitForConnection(connectedAccountId, 60_000);
+    await this.runWithResilience(() => this.client!.connectedAccounts.waitForConnection(connectedAccountId, 60_000));
   }
 
   async listConnections(composioUserId: string): Promise<ComposioConnection[]> {
@@ -131,7 +141,9 @@ export class ComposioService {
       return [];
     }
 
-    const response = await this.client.connectedAccounts.list({ userIds: [composioUserId] } as never);
+    const response = await this.runWithResilience(() =>
+      this.client!.connectedAccounts.list({ userIds: [composioUserId] } as never)
+    );
     const items = asArray((response as { items?: unknown[] }).items);
 
     return items
@@ -163,10 +175,12 @@ export class ComposioService {
       return {};
     }
 
-    const rawTools = await this.client.tools.getRawComposioTools({
-      toolkits: toolkitSlugs,
-      limit: 400
-    });
+    const rawTools = await this.runWithResilience(() =>
+      this.client!.tools.getRawComposioTools({
+        toolkits: toolkitSlugs,
+        limit: 400
+      })
+    );
 
     const toolItems = Array.isArray(rawTools) ? rawTools : asArray((rawTools as { items?: unknown[] }).items);
     const definitions: ToolByName = {};
@@ -226,12 +240,23 @@ export class ComposioService {
       throw new Error("Composio is not configured.");
     }
 
-    return this.client.tools.execute(toolSlug, {
-      userId: composioUserId,
-      connectedAccountId: connectedAccountId ?? undefined,
-      arguments: args,
-      dangerouslySkipVersionCheck: true
-    });
+    return this.runWithResilience(() =>
+      this.client!.tools.execute(toolSlug, {
+        userId: composioUserId,
+        connectedAccountId: connectedAccountId ?? undefined,
+        arguments: args,
+        dangerouslySkipVersionCheck: true
+      })
+    );
+  }
+
+  private async runWithResilience<T>(operation: () => Promise<T>): Promise<T> {
+    return this.breaker.execute(() =>
+      withRetries(operation, {
+        retries: this.env.providerMaxRetries,
+        shouldRetry: isRetriableError
+      })
+    );
   }
 }
 

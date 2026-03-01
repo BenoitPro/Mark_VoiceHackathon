@@ -13,6 +13,7 @@ for (const candidate of [
 type EnvConfig = {
   port: number;
   webOrigin: string;
+  webOrigins: string[];
   supabaseUrl: string | null;
   supabaseAnonKey: string | null;
   supabaseServiceRoleKey: string | null;
@@ -33,6 +34,16 @@ type EnvConfig = {
   elevenLabsApiKey: string | null;
   elevenLabsVoiceId: string;
   elevenLabsModelId: string;
+  apiRateLimitWindowMs: number;
+  apiRateLimitMax: number;
+  socketUtteranceRateLimitPerMinute: number;
+  providerTimeoutMs: number;
+  providerMaxRetries: number;
+  providerCircuitBreakerFailures: number;
+  providerCircuitBreakerCooldownMs: number;
+  stripeCheckoutUrl: string | null;
+  paidUserEmails: string[];
+  telemetryEnabled: boolean;
 };
 
 function readString(name: string, fallback = ""): string {
@@ -71,13 +82,31 @@ function readSpeechmaticsTtsOutputFormat(): "wav_16000" | "pcm_16000" {
   return raw === "pcm_16000" ? "pcm_16000" : "wav_16000";
 }
 
+function readCsvList(name: string): string[] {
+  const raw = readString(name);
+  if (!raw) {
+    return [];
+  }
+  return raw
+    .split(",")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
 export function getEnvConfig(): EnvConfig {
   const port = readNumber("PORT", 4000);
   const webOrigin = readString("WEB_ORIGIN", "http://localhost:5173");
+  const webOrigins = Array.from(
+    new Set([
+      webOrigin,
+      ...readCsvList("WEB_ORIGINS")
+    ])
+  );
 
   return {
     port,
     webOrigin,
+    webOrigins,
     supabaseUrl: readOptional("SUPABASE_URL"),
     supabaseAnonKey: readOptional("SUPABASE_ANON_KEY"),
     supabaseServiceRoleKey: readOptional("SUPABASE_SERVICE_ROLE_KEY"),
@@ -100,7 +129,17 @@ export function getEnvConfig(): EnvConfig {
     speechmaticsMaxDelaySeconds: readNumber("SPEECHMATICS_MAX_DELAY_SECONDS", 1.1),
     elevenLabsApiKey: readOptional("ELEVENLABS_API_KEY"),
     elevenLabsVoiceId: readString("ELEVENLABS_VOICE_ID", "21m00Tcm4TlvDq8ikWAM"),
-    elevenLabsModelId: readString("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
+    elevenLabsModelId: readString("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2"),
+    apiRateLimitWindowMs: readNumber("API_RATE_LIMIT_WINDOW_MS", 60_000),
+    apiRateLimitMax: readNumber("API_RATE_LIMIT_MAX", 180),
+    socketUtteranceRateLimitPerMinute: readNumber("SOCKET_UTTERANCE_RATE_LIMIT_PER_MIN", 45),
+    providerTimeoutMs: readNumber("PROVIDER_TIMEOUT_MS", 20_000),
+    providerMaxRetries: readNumber("PROVIDER_MAX_RETRIES", 2),
+    providerCircuitBreakerFailures: readNumber("PROVIDER_CIRCUIT_BREAKER_FAILURES", 5),
+    providerCircuitBreakerCooldownMs: readNumber("PROVIDER_CIRCUIT_BREAKER_COOLDOWN_MS", 30_000),
+    stripeCheckoutUrl: readOptional("STRIPE_CHECKOUT_URL"),
+    paidUserEmails: readCsvList("PAID_USER_EMAILS").map((value) => value.toLowerCase()),
+    telemetryEnabled: readBoolean("TELEMETRY_ENABLED", true)
   };
 }
 

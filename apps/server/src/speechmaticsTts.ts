@@ -1,9 +1,16 @@
 import type { EnvConfig } from "./env.js";
+import { CircuitBreaker, isRetriableError, withRetries, withTimeout } from "./reliability.js";
 
 export class SpeechmaticsTtsService {
   private lastProviderErrorAt: string | null = null;
+  private readonly breaker: CircuitBreaker;
 
-  constructor(private readonly env: EnvConfig) {}
+  constructor(private readonly env: EnvConfig) {
+    this.breaker = new CircuitBreaker({
+      failureThreshold: env.providerCircuitBreakerFailures,
+      cooldownMs: env.providerCircuitBreakerCooldownMs
+    });
+  }
 
   isConfigured(): boolean {
     return Boolean(this.env.speechmaticsApiKey);
@@ -31,17 +38,33 @@ export class SpeechmaticsTtsService {
     }
 
     const url = `${this.env.speechmaticsTtsBaseUrl}/generate/${encodeURIComponent(this.env.speechmaticsTtsVoice)}?output_format=${this.env.speechmaticsTtsOutputFormat}`;
-    const response = await fetch(url, {
-      method: "POST",
-      signal,
-      headers: {
-        Authorization: `Bearer ${this.env.speechmaticsApiKey}`,
-        "content-type": "application/json"
-      },
-      body: JSON.stringify({
-        text
-      })
-    });
+    const response = await this.breaker.execute(() =>
+      withRetries(
+        () =>
+          withTimeout(
+            (timeoutSignal) => {
+              const combinedSignal = mergeAbortSignals(timeoutSignal, signal);
+              return fetch(url, {
+                method: "POST",
+                signal: combinedSignal,
+                headers: {
+                  Authorization: `Bearer ${this.env.speechmaticsApiKey}`,
+                  "content-type": "application/json"
+                },
+                body: JSON.stringify({
+                  text
+                })
+              });
+            },
+            this.env.providerTimeoutMs,
+            "Speechmatics TTS request timed out."
+          ),
+        {
+          retries: this.env.providerMaxRetries,
+          shouldRetry: isRetriableError
+        }
+      )
+    );
 
     if (!response.ok || !response.body) {
       this.lastProviderErrorAt = new Date().toISOString();
@@ -66,6 +89,22 @@ export class SpeechmaticsTtsService {
       contentType: "audio/wav"
     };
   }
+}
+
+function mergeAbortSignals(primary: AbortSignal, secondary?: AbortSignal): AbortSignal {
+  if (!secondary) {
+    return primary;
+  }
+  if (secondary.aborted) {
+    return secondary;
+  }
+  const controller = new AbortController();
+  const onAbort = () => {
+    controller.abort();
+  };
+  primary.addEventListener("abort", onAbort, { once: true });
+  secondary.addEventListener("abort", onAbort, { once: true });
+  return controller.signal;
 }
 
 async function safeText(response: Response): Promise<string> {

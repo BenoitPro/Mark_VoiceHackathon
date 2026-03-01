@@ -103,6 +103,7 @@ function createBaseProps(): ComponentProps<typeof VoiceStage> {
     actionStatusMessage: null,
     activeTtsProvider: null,
     providerDiagnostics: diagnostics,
+    startBlockedReason: null,
     onStart: vi.fn(),
     onStop: vi.fn(),
     onToggleMic: vi.fn(),

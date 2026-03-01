@@ -1,9 +1,16 @@
 import type { EnvConfig } from "./env.js";
+import { CircuitBreaker, isRetriableError, withRetries, withTimeout } from "./reliability.js";
 
 export class SpeechmaticsAdapter {
   private lastProviderErrorAt: string | null = null;
+  private readonly breaker: CircuitBreaker;
 
-  constructor(private readonly env: EnvConfig) {}
+  constructor(private readonly env: EnvConfig) {
+    this.breaker = new CircuitBreaker({
+      failureThreshold: env.providerCircuitBreakerFailures,
+      cooldownMs: env.providerCircuitBreakerCooldownMs
+    });
+  }
 
   isConfigured(): boolean {
     return Boolean(this.env.speechmaticsApiKey);
@@ -37,13 +44,16 @@ export class SpeechmaticsAdapter {
 
     formData.append("data_file", new Blob([bytes], { type: mimeType }), pickFileName(mimeType));
 
-    const createRes = await fetch(uploadUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.env.speechmaticsApiKey}`
-      },
-      body: formData
-    });
+    const createRes = await this.runRequest((signal) =>
+      fetch(uploadUrl, {
+        method: "POST",
+        signal,
+        headers: {
+          Authorization: `Bearer ${this.env.speechmaticsApiKey}`
+        },
+        body: formData
+      })
+    );
 
     if (!createRes.ok) {
       this.recordProviderError();
@@ -60,12 +70,15 @@ export class SpeechmaticsAdapter {
 
     await this.waitForJobCompletion(jobId);
 
-    const transcriptRes = await fetch(`${this.env.speechmaticsApiBaseUrl}/jobs/${jobId}/transcript?format=txt`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${this.env.speechmaticsApiKey}`
-      }
-    });
+    const transcriptRes = await this.runRequest((signal) =>
+      fetch(`${this.env.speechmaticsApiBaseUrl}/jobs/${jobId}/transcript?format=txt`, {
+        method: "GET",
+        signal,
+        headers: {
+          Authorization: `Bearer ${this.env.speechmaticsApiKey}`
+        }
+      })
+    );
 
     if (!transcriptRes.ok) {
       this.recordProviderError();
@@ -81,12 +94,17 @@ export class SpeechmaticsAdapter {
     const maxAttempts = 180;
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
-      const res = await fetch(`${this.env.speechmaticsApiBaseUrl}/jobs/${jobId}`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.env.speechmaticsApiKey}`
-        }
-      });
+      const res = await this.runRequest(
+        (signal) =>
+          fetch(`${this.env.speechmaticsApiBaseUrl}/jobs/${jobId}`, {
+            method: "GET",
+            signal,
+            headers: {
+              Authorization: `Bearer ${this.env.speechmaticsApiKey}`
+            }
+          }),
+        { retries: 0 }
+      );
 
       if (!res.ok) {
         this.recordProviderError();
@@ -115,6 +133,31 @@ export class SpeechmaticsAdapter {
 
   private recordProviderError(): void {
     this.lastProviderErrorAt = new Date().toISOString();
+  }
+
+  private async runRequest(
+    request: (signal: AbortSignal) => Promise<Response>,
+    options?: { retries?: number }
+  ): Promise<Response> {
+    try {
+      return await this.breaker.execute(() =>
+        withRetries(
+          () =>
+            withTimeout(
+              (signal) => request(signal),
+              this.env.providerTimeoutMs,
+              "Speechmatics request timed out."
+            ),
+          {
+            retries: options?.retries ?? this.env.providerMaxRetries,
+            shouldRetry: isRetriableError
+          }
+        )
+      );
+    } catch (error) {
+      this.recordProviderError();
+      throw error;
+    }
   }
 }
 

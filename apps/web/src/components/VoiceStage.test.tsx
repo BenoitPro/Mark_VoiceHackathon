@@ -48,6 +48,25 @@ describe("VoiceStage", () => {
     expect(onStart).toHaveBeenCalledTimes(1);
   });
 
+  it("blocks start action when a start blocker is present", async () => {
+    const user = userEvent.setup();
+    const onStart = vi.fn();
+
+    render(
+      <VoiceStage
+        {...createBaseProps()}
+        startBlockedReason="Connect Gmail first."
+        onStart={onStart}
+      />
+    );
+
+    const control = screen.getByRole("button", { name: "Connect Gmail to start listening" });
+    expect(control).toBeDisabled();
+    expect(screen.getByText("Connect Gmail first.")).toBeInTheDocument();
+    await user.click(control);
+    expect(onStart).toHaveBeenCalledTimes(0);
+  });
+
   it("toggles microphone mute when control is pressed while running", async () => {
     const user = userEvent.setup();
     const onToggleMic = vi.fn();
@@ -146,20 +165,22 @@ describe("VoiceStage", () => {
     expect(screen.queryByRole("img", { name: /Voice state:/i })).not.toBeInTheDocument();
   });
 
-  it("uses stitch transcript fallback when no live transcript is available", () => {
+  it("uses a realistic transcript fallback when no live transcript is available", () => {
     render(<VoiceStage {...createBaseProps()} />);
 
     expect(screen.getByRole("heading", { name: "Recent Activity" })).toBeInTheDocument();
-    expect(screen.getByText(/Draft a brief follow-up email to the engineering team/i)).toBeInTheDocument();
+    expect(screen.getByText(/Ready\. Ask me to triage your unread inbox emails\./i)).toBeInTheDocument();
   });
 
-  it("shows an activity empty state when there are no live notifications", () => {
+  it("shows an empty activity lane when there are no live notifications", () => {
     render(<VoiceStage {...createBaseProps()} />);
 
+    expect(screen.queryByText("Slack from your manager")).not.toBeInTheDocument();
+    expect(screen.queryByText("LinkedIn client message")).not.toBeInTheDocument();
+    expect(screen.queryByText("Big deal email")).not.toBeInTheDocument();
     expect(screen.getByText("No recent actions yet.")).toBeInTheDocument();
-    expect(screen.getByText(/Speak to generate your first activity item./i)).toBeInTheDocument();
+    expect(screen.getByText("Speak to generate your first activity item.")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "View all" })).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Approve" })).not.toBeInTheDocument();
   });
 
   it("opens the notifications page when View all is pressed", async () => {
@@ -245,6 +266,7 @@ function createBaseProps(): ComponentProps<typeof VoiceStage> {
     actionStatusMessage: null,
     activeTtsProvider: null,
     providerDiagnostics: diagnostics,
+    startBlockedReason: null,
     onStart: vi.fn(),
     onStop: vi.fn(),
     isMicMuted: false,

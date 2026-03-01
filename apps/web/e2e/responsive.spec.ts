@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 test("auth screen has no horizontal overflow", async ({ page }) => {
   await page.goto("/");
-  await page.getByRole("heading", { name: "Authentication Required" }).waitFor();
+  await page.getByRole("button", { name: /sign in with google|continue with google/i }).first().waitFor();
 
   const dimensions = await page.evaluate(() => {
     return {

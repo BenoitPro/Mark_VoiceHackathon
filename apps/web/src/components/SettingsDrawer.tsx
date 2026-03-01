@@ -13,7 +13,15 @@ type SettingsDrawerProps = {
   onClose: () => void;
   returnFocusRef?: RefObject<HTMLElement | null> | null;
   defaultSection?: SettingsDrawerSection;
+  connected: boolean;
   isRunning: boolean;
+  isMicMuted: boolean;
+  voiceState: string;
+  audioLevel: number;
+  userPartial: string;
+  userFinal: string;
+  agentPartial: string;
+  agentFinal: string;
   canResetMemory: boolean;
   sessionId: string | null;
   sttMessage: string | null;
@@ -48,7 +56,15 @@ export function SettingsDrawer({
   onClose,
   returnFocusRef = null,
   defaultSection = "apps",
+  connected,
   isRunning,
+  isMicMuted,
+  voiceState,
+  audioLevel,
+  userPartial,
+  userFinal,
+  agentPartial,
+  agentFinal,
   canResetMemory,
   sessionId,
   sttMessage,
@@ -108,8 +124,70 @@ export function SettingsDrawer({
       groups[categorizeAppSlug(item.toolkitSlug)].push(item);
     }
 
+    for (const categoryId of STITCH_CATEGORY_ORDER) {
+      groups[categoryId].sort((left, right) => {
+        if (left.isActive !== right.isActive) {
+          return left.isActive ? -1 : 1;
+        }
+        return left.toolkitName.localeCompare(right.toolkitName);
+      });
+    }
+
     return groups;
   }, [filteredItems]);
+
+  const categoryStats = useMemo(() => {
+    const stats: Record<StitchAppCategoryId, { total: number; connected: number }> = {
+      email: { total: 0, connected: 0 },
+      messaging: { total: 0, connected: 0 },
+      productivity: { total: 0, connected: 0 },
+      other: { total: 0, connected: 0 }
+    };
+
+    for (const categoryId of STITCH_CATEGORY_ORDER) {
+      const items = groupedItems[categoryId];
+      stats[categoryId] = {
+        total: items.length,
+        connected: items.filter((item) => item.isActive).length
+      };
+    }
+
+    return stats;
+  }, [groupedItems]);
+
+  const appSummary = useMemo(() => {
+    const total = appsItems.length;
+    const connectedCount = appsItems.filter((item) => item.isActive).length;
+    const visibleCount = filteredItems.length;
+    const pendingName = appsItems.find((item) => item.authConfigId === connectingAuthConfigId)?.toolkitName ?? "none";
+    return {
+      total,
+      connected: connectedCount,
+      notConnected: Math.max(0, total - connectedCount),
+      visible: visibleCount,
+      hidden: Math.max(0, total - visibleCount),
+      pendingName
+    };
+  }, [appsItems, connectingAuthConfigId, filteredItems.length]);
+
+  const voiceRuntime = useMemo(() => {
+    return {
+      connection: connected ? "connected" : "disconnected",
+      listening: isRunning ? "running" : "stopped",
+      microphone: !isRunning ? "idle" : isMicMuted ? "muted" : "live",
+      stage: voiceState,
+      audioInput: formatAudioLevel(audioLevel)
+    };
+  }, [audioLevel, connected, isMicMuted, isRunning, voiceState]);
+
+  const transcriptSnapshot = useMemo(() => {
+    return {
+      userPartial: previewSettingValue(userPartial, "none"),
+      userFinal: previewSettingValue(userFinal, "none"),
+      agentPartial: previewSettingValue(agentPartial, "none"),
+      agentFinal: previewSettingValue(agentFinal, "none")
+    };
+  }, [agentFinal, agentPartial, userFinal, userPartial]);
 
   const timelinePreview = useMemo(() => {
     return timelineItems.slice(0, 6);
@@ -199,14 +277,20 @@ export function SettingsDrawer({
               {loadingApps ? <p className="stitch-settings-hint">Loading integrations...</p> : null}
               {!loadingApps && filteredItems.length === 0 ? <p className="stitch-settings-hint">No matching apps.</p> : null}
 
-              {STITCH_CATEGORY_ORDER.filter((categoryId) => groupedItems[categoryId].length > 0).map((categoryId, index) => (
+              {STITCH_CATEGORY_ORDER.map((categoryId, index) => (
                 <details key={categoryId} className="stitch-accordion" open={index === 0}>
                   <summary>
                     <span>{STITCH_CATEGORY_LABELS[categoryId]}</span>
-                    <span className="stitch-accordion-count">{groupedItems[categoryId].length}</span>
+                    <span className="stitch-accordion-count">
+                      {categoryStats[categoryId].connected}/{categoryStats[categoryId].total} connected
+                    </span>
                   </summary>
 
                   <div className="stitch-accordion-content">
+                    {groupedItems[categoryId].length === 0 ? (
+                      <p className="stitch-settings-hint">No apps available in this category.</p>
+                    ) : null}
+
                     {groupedItems[categoryId].map((item) => {
                       const isConnecting = connectingAuthConfigId === item.authConfigId;
                       return (
@@ -283,6 +367,88 @@ export function SettingsDrawer({
                 </section>
 
                 <section className="stitch-settings-panel stitch-settings-panel-advanced">
+                  <h3>Voice Runtime</h3>
+                  <dl className="stitch-status-list">
+                    <div>
+                      <dt>Connection</dt>
+                      <dd>{voiceRuntime.connection}</dd>
+                    </div>
+                    <div>
+                      <dt>Listener</dt>
+                      <dd>{voiceRuntime.listening}</dd>
+                    </div>
+                    <div>
+                      <dt>Microphone</dt>
+                      <dd>{voiceRuntime.microphone}</dd>
+                    </div>
+                    <div>
+                      <dt>Stage</dt>
+                      <dd>{voiceRuntime.stage}</dd>
+                    </div>
+                    <div>
+                      <dt>Audio Input</dt>
+                      <dd>{voiceRuntime.audioInput}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section className="stitch-settings-panel stitch-settings-panel-advanced">
+                  <h3>Catalog & Integrations</h3>
+                  <dl className="stitch-status-list">
+                    <div>
+                      <dt>Visible</dt>
+                      <dd>{appSummary.visible}</dd>
+                    </div>
+                    <div>
+                      <dt>Total Apps</dt>
+                      <dd>{appSummary.total}</dd>
+                    </div>
+                    <div>
+                      <dt>Connected</dt>
+                      <dd>{appSummary.connected}</dd>
+                    </div>
+                    <div>
+                      <dt>Not Connected</dt>
+                      <dd>{appSummary.notConnected}</dd>
+                    </div>
+                    <div>
+                      <dt>Filtered Out</dt>
+                      <dd>{appSummary.hidden}</dd>
+                    </div>
+                    <div>
+                      <dt>Search</dt>
+                      <dd>{appsSearch.trim().length > 0 ? appsSearch : "none"}</dd>
+                    </div>
+                    <div>
+                      <dt>Connecting</dt>
+                      <dd>{appSummary.pendingName}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section className="stitch-settings-panel stitch-settings-panel-advanced">
+                  <h3>Transcript Snapshot</h3>
+                  <dl className="stitch-status-list">
+                    <div>
+                      <dt>You (partial)</dt>
+                      <dd>{transcriptSnapshot.userPartial}</dd>
+                    </div>
+                    <div>
+                      <dt>You (final)</dt>
+                      <dd>{transcriptSnapshot.userFinal}</dd>
+                    </div>
+                    <div>
+                      <dt>Agent (partial)</dt>
+                      <dd>{transcriptSnapshot.agentPartial}</dd>
+                    </div>
+                    <div>
+                      <dt>Agent (final)</dt>
+                      <dd>{transcriptSnapshot.agentFinal}</dd>
+                    </div>
+                  </dl>
+                </section>
+
+                <section className="stitch-settings-panel stitch-settings-panel-advanced">
                   <h3>Runtime Diagnostics</h3>
                   <dl className="stitch-status-list">
                     {providerDiagnostics.map((item) => (
@@ -323,4 +489,17 @@ export function SettingsDrawer({
       </aside>
     </>
   );
+}
+
+function formatAudioLevel(value: number): string {
+  const normalized = Math.max(0, Math.min(1, value));
+  return `${Math.round(normalized * 100)}%`;
+}
+
+function previewSettingValue(value: string, fallback: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+  return trimmed.length > 90 ? `${trimmed.slice(0, 87)}...` : trimmed;
 }

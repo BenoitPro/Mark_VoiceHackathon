@@ -1,4 +1,5 @@
 import type { EnvConfig } from "./env.js";
+import { CircuitBreaker, isRetriableError, withRetries, withTimeout } from "./reliability.js";
 
 type Turn = {
   role: "user" | "assistant";
@@ -113,8 +114,14 @@ export class AnthropicService {
   private readonly historyBySession = new Map<string, Turn[]>();
   private readonly maxHistory = MAX_HISTORY_TURNS;
   private readonly baseUrl = "https://api.anthropic.com/v1/messages";
+  private readonly breaker: CircuitBreaker;
 
-  constructor(private readonly env: EnvConfig) {}
+  constructor(private readonly env: EnvConfig) {
+    this.breaker = new CircuitBreaker({
+      failureThreshold: env.providerCircuitBreakerFailures,
+      cooldownMs: env.providerCircuitBreakerCooldownMs
+    });
+  }
 
   isConfigured(): boolean {
     return Boolean(this.env.anthropicApiKey);
@@ -424,15 +431,30 @@ export class AnthropicService {
       return {};
     }
 
-    const response = await fetch(this.baseUrl, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        "x-api-key": this.env.anthropicApiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify(body)
-    });
+    const response = await this.breaker.execute(() =>
+      withRetries(
+        () =>
+          withTimeout(
+            async (signal) =>
+              fetch(this.baseUrl, {
+                method: "POST",
+                signal,
+                headers: {
+                  "content-type": "application/json",
+                  "x-api-key": this.env.anthropicApiKey!,
+                  "anthropic-version": "2023-06-01"
+                },
+                body: JSON.stringify(body)
+              }),
+            this.env.providerTimeoutMs,
+            "Anthropic request timed out."
+          ),
+        {
+          retries: this.env.providerMaxRetries,
+          shouldRetry: isRetriableError
+        }
+      )
+    );
 
     if (!response.ok) {
       const errBody = await safeText(response);

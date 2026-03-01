@@ -36,6 +36,8 @@ describe("SettingsDrawer", () => {
     expect(screen.getByText("Email Platforms")).toBeInTheDocument();
     expect(screen.getByText("Messaging Apps")).toBeInTheDocument();
     expect(screen.getByText("Productivity Tools")).toBeInTheDocument();
+    expect(screen.getByText("Other Integrations")).toBeInTheDocument();
+    expect(screen.getByText("No apps available in this category.")).toBeInTheDocument();
   });
 
   it("filters visible apps from search", () => {
@@ -83,6 +85,9 @@ describe("SettingsDrawer", () => {
     expect(advancedSettings).toHaveAttribute("open");
     expect(screen.getByText("Session Controls")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Start Listening" })).toBeInTheDocument();
+    expect(screen.getByText("Voice Runtime")).toBeInTheDocument();
+    expect(screen.getByText("Catalog & Integrations")).toBeInTheDocument();
+    expect(screen.getByText("Transcript Snapshot")).toBeInTheDocument();
     expect(screen.getByText("Runtime Diagnostics")).toBeInTheDocument();
     expect(screen.getByText("Sent follow-up email.")).toBeInTheDocument();
   });
@@ -256,6 +261,14 @@ function baseProps() {
     sttMessage: null,
     actionStatusMessage: null,
     activeTtsProvider: null,
+    connected: true,
+    isMicMuted: false,
+    voiceState: "idle",
+    audioLevel: 0.2,
+    userPartial: "",
+    userFinal: "",
+    agentPartial: "",
+    agentFinal: "",
     providerDiagnostics,
     onStart: vi.fn(),
     onStop: vi.fn(),

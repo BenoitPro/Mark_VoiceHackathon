@@ -1,62 +1,61 @@
 # Mark Voice Action Agent
 
-Authenticated voice-first web app using:
-- Supabase (Google OAuth + persistent audit storage)
-- Composio (connectable app catalog + tool execution)
-- Anthropic (reasoning + tool orchestration + draft revision)
-- Speechmatics (one-shot STT)
-- Speechmatics-first TTS (`wav_16000`) with ElevenLabs fallback
+Voice-first Gmail triage assistant with approval-gated actions.
 
-Flow:
-- Browser records utterances, auto-detects end-of-speech, encodes to MP3, and sends one-shot audio for STT.
-- Agent can auto-execute read tools.
-- Mutating tools create pending drafts and require explicit approval/rejection.
-- Approval loop supports iterative voice revisions.
-- Gmail triage supports relative windows such as `last hour` (mapped to `newer_than:1h`).
-- In Gmail triage mode, the agent can prepare draft-reply actions for approval directly from the selected email.
+## Stack
 
-## Requirements
+- Web: React + Vite
+- API: Express + Socket.IO
+- Auth and audit storage: Supabase
+- Integrations: Composio
+- LLM: Anthropic
+- Speech: Speechmatics (primary) + ElevenLabs fallback for TTS
+
+## Product Scope (V1)
+
+- Sign in with Google
+- Connect Gmail through Composio
+- Ask for inbox triage by voice
+- Generate reply drafts
+- Approve or reject mutating actions before execution
+
+## Prerequisites
 
 - Node.js 20+
 - pnpm 10+
 
-## Setup
+## Local Setup
 
 ```bash
 pnpm install
 cp apps/server/.env.example apps/server/.env.local
 cp apps/web/.env.example apps/web/.env.local
-# fill keys in both .env.local files
 ```
 
-Required server env keys:
-- `SUPABASE_URL`
-- `SUPABASE_SERVICE_ROLE_KEY`
-- `SUPABASE_ANON_KEY`
-- `COMPOSIO_API_KEY`
-- `COMPOSIO_CONNECT_CALLBACK_URL`
-- `ANTHROPIC_API_KEY`
-- `SPEECHMATICS_API_KEY`
-- `SPEECHMATICS_TTS_BASE_URL` (default provided)
-- `SPEECHMATICS_TTS_VOICE` (default `sarah`)
-- `SPEECHMATICS_TTS_OUTPUT_FORMAT` (default `wav_16000`)
-- `ELEVENLABS_API_KEY`
+Fill required keys in both `.env.local` files.
 
-Required web env keys:
-- `VITE_SUPABASE_URL`
-- `VITE_SUPABASE_ANON_KEY`
-- `VITE_API_BASE_URL` (optional, defaults to `http://localhost:4000`)
+## Key Endpoints
 
-Supabase schema:
-- The schema is now a Supabase CLI migration in [`supabase/migrations/20260301042017_init_agent_action_schema.sql`](/Users/guillaume_deramchi/Documents/mark/supabase/migrations/20260301042017_init_agent_action_schema.sql).
-- Apply it with:
-  - `supabase link --project-ref <your-project-ref>`
-  - `supabase db push`
+- `GET /health`
+- `GET /health/voice`
+- `GET /health/readiness`
+- `GET /v1/auth/me`
+- `GET /v1/billing/status`
+- `POST /v1/billing/checkout-link`
+- `POST /v1/telemetry/events`
 
-Supabase CLI bootstrap done in this repo:
-- [`supabase/config.toml`](/Users/guillaume_deramchi/Documents/mark/supabase/config.toml) initialized
-- [`supabase/seed.sql`](/Users/guillaume_deramchi/Documents/mark/supabase/seed.sql) created
-- auth redirect defaults updated to `http://localhost:5173`
+## Supabase Migration
+
+Schema migration file:
+
+- [`supabase/migrations/20260301042017_init_agent_action_schema.sql`](/Users/benoit/Documents/HAck V Samir/mark/supabase/migrations/20260301042017_init_agent_action_schema.sql)
+
+Apply it:
+
+```bash
+supabase link --project-ref <your-project-ref>
+supabase db push
+```
 
 ## Run
 
@@ -64,24 +63,20 @@ Supabase CLI bootstrap done in this repo:
 pnpm dev
 ```
 
-- Web UI: `http://localhost:5173`
+- Web: `http://localhost:5173`
 - API: `http://localhost:4000`
-- Voice health: `http://localhost:4000/health/voice`
 
-## Scripts
+## Verification Commands
 
 ```bash
-pnpm dev
-pnpm build
 pnpm typecheck
 pnpm test
+pnpm build
+cd apps/web && pnpm test:e2e
 ```
 
 ## Notes
 
-- Authentication is mandatory for action-capable sessions.
-- General chat memory remains in-memory and can reset on restart.
-- Gmail triage workflow memory (selection/draft/sent progress) is persisted locally in `apps/server/.runtime/email-workflows.json`.
-- Action/audit persistence is available when Supabase schema is applied.
-- TTS priority is Speechmatics first, then ElevenLabs fallback.
-- Real credentials should stay in `.env.local` only.
+- Runtime Gmail workflow cache is stored in `apps/server/.runtime/email-workflows.json` and is gitignored.
+- Mutating tool actions remain approval-gated.
+- Keep real secrets only in `.env.local`.

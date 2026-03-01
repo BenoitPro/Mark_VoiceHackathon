@@ -32,6 +32,7 @@ type VoiceStageProps = {
   actionStatusMessage: string | null;
   activeTtsProvider: string | null;
   providerDiagnostics: ProviderDiagnosticItem[];
+  startBlockedReason: string | null;
   onStart: () => void;
   onStop: () => void;
   onToggleMic: () => void;
@@ -67,6 +68,7 @@ export function VoiceStage({
   actionStatusMessage,
   activeTtsProvider,
   providerDiagnostics,
+  startBlockedReason,
   onStart,
   onStop,
   onToggleMic,
@@ -93,6 +95,7 @@ export function VoiceStage({
     pendingAction,
     actionStatus
   });
+  const laneNotifications = notifications;
 
   const stageMode = useMemo<StageMode>(() => {
     if (actionStatus?.status === "executing") {
@@ -110,7 +113,14 @@ export function VoiceStage({
     }
   }, [actionStatus?.status, voiceState]);
   const isListeningMode = isRunning && !isMicMuted && voiceState === "listening";
-  const micControlLabel = !isRunning ? "Start listening" : isMicMuted ? "Unmute microphone" : "Mute microphone";
+  const isStartBlocked = !isRunning && Boolean(startBlockedReason);
+  const micControlLabel = !isRunning
+    ? isStartBlocked
+      ? "Connect Gmail to start listening"
+      : "Start listening"
+    : isMicMuted
+      ? "Unmute microphone"
+      : "Mute microphone";
   const micControlClassName = `stitch-mic-btn ${!isRunning ? "is-idle" : isMicMuted ? "is-muted" : "is-live"} ${
     isListeningMode ? "is-listening" : ""
   }`;
@@ -140,7 +150,7 @@ export function VoiceStage({
       return `You: ${finalUser}`;
     }
 
-    return "Draft a brief follow-up email to the engineering team about the Q4 sprint progress and next steps.";
+    return "Ready. Ask me to triage your unread inbox emails.";
   }, [agentFinal, agentPartial, stageMode, userFinal, userPartial]);
   const caption = useMemo(() => shorten(fullCaption, CAPTION_PREVIEW_LIMIT), [fullCaption]);
   const canExpandCaption = fullCaption.length > CAPTION_PREVIEW_LIMIT;
@@ -236,6 +246,7 @@ export function VoiceStage({
               type="button"
               aria-label={micControlLabel}
               aria-pressed={isRunning ? isMicMuted : undefined}
+              disabled={isStartBlocked}
               onClick={isRunning ? onToggleMic : onStart}
             >
               <svg className="stitch-mic-icon" viewBox="0 0 24 24" aria-hidden>
@@ -253,6 +264,19 @@ export function VoiceStage({
               </svg>
             </button>
           </header>
+
+          {isStartBlocked ? (
+            <div className="stitch-start-blocked" role="status" aria-live="polite">
+              <p>{startBlockedReason}</p>
+              <button
+                type="button"
+                className="stitch-mini-btn is-neutral"
+                onClick={() => openSettings("apps")}
+              >
+                Open app settings
+              </button>
+            </div>
+          ) : null}
 
           <div className="voice-stage-center stitch-stage-center">
             <p className="stitch-transcript-kicker">Live Transcript</p>
@@ -315,7 +339,7 @@ export function VoiceStage({
           ) : null}
 
           <ActionNotificationLane
-            notifications={notifications}
+            notifications={laneNotifications}
             pendingAction={pendingAction}
             onApprovePending={onApprovePending}
             onRejectPending={onRejectPending}
@@ -329,7 +353,15 @@ export function VoiceStage({
         onClose={() => setSettingsOpen(false)}
         returnFocusRef={settingsTriggerRef}
         defaultSection={settingsSection}
+        connected={connected}
         isRunning={isRunning}
+        isMicMuted={isMicMuted}
+        voiceState={voiceState}
+        audioLevel={audioLevel}
+        userPartial={userPartial}
+        userFinal={userFinal}
+        agentPartial={agentPartial}
+        agentFinal={agentFinal}
         canResetMemory={connected}
         sessionId={sessionId}
         sttMessage={sttMessage}

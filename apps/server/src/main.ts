@@ -1,5 +1,8 @@
+import { randomUUID } from "node:crypto";
 import cors from "cors";
 import express, { type NextFunction, type Request, type Response } from "express";
+import rateLimit from "express-rate-limit";
+import helmet from "helmet";
 import { createServer } from "node:http";
 import { Server, type Socket } from "socket.io";
 
@@ -9,6 +12,8 @@ import {
   type ActionExecutedEvent,
   type ActionFailedEvent,
   type ActionHistoryResponse,
+  type BillingCheckoutResponse,
+  type BillingStatusResponse,
   type ActionProposedEvent,
   type ActionRejectEvent,
   type ActionRejectedEvent,
@@ -22,6 +27,8 @@ import {
   type ComposioConnectLinkResponse,
   type ComposioConnectionItem,
   type ErrorRaisedEvent,
+  type TelemetryEventName,
+  type TelemetryEventRequest,
   type SessionStartedEvent,
   type SttStatusEvent,
   type TranscriptEvent,
@@ -88,6 +95,7 @@ type SessionState = {
   activeEmailWorkflowId: string | null;
   emailTriageCache: EmailTriageCache | null;
   emailConversation: EmailConversationState;
+  recentUtteranceAtMs: number[];
 };
 
 type AuthedRequest = Request & {
@@ -112,13 +120,47 @@ const emailWorkflowStore = new EmailWorkflowStore();
 const toolsBySessionCache = new TimedSessionCache<Awaited<ReturnType<typeof composio.listToolsByUser>>>(60_000);
 
 const EMAIL_REPLY_DRAFT_MAX_CHARS = 1_400;
+const BILLING_PAID = "paid";
+const BILLING_TRIAL = "trial";
+const MAX_AUTH_CONFIG_ID_LENGTH = 200;
+const MAX_REASON_LENGTH = 300;
+
+const TELEMETRY_EVENTS: Set<TelemetryEventName> = new Set([
+  "visit",
+  "signup",
+  "gmail_connected",
+  "first_triage",
+  "checkout_clicked"
+]);
 
 const app = express();
+app.disable("x-powered-by");
+app.use(
+  helmet({
+    crossOriginResourcePolicy: false
+  })
+);
 app.use(express.json({ limit: "5mb" }));
 app.use(
   cors({
-    origin: env.webOrigin,
+    origin: (origin, callback) => {
+      if (!origin || env.webOrigins.includes(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error("CORS origin denied"));
+    },
     credentials: false
+  })
+);
+app.use(
+  "/v1",
+  rateLimit({
+    windowMs: env.apiRateLimitWindowMs,
+    max: env.apiRateLimitMax,
+    standardHeaders: "draft-8",
+    legacyHeaders: false,
+    message: { message: "Too many requests. Please retry shortly." }
   })
 );
 
@@ -155,6 +197,23 @@ app.get("/health/voice", (_req, res) => {
   });
 });
 
+app.get("/health/readiness", (_req, res) => {
+  const dependencies = {
+    stt: stt.isConfigured(),
+    tts: tts.isAnyConfigured(),
+    llm: llm.isConfigured(),
+    auth: auth.isConfigured(),
+    composio: composio.isConfigured()
+  };
+  const ready = Object.values(dependencies).every(Boolean);
+
+  res.status(ready ? 200 : 503).json({
+    ok: ready,
+    dependencies,
+    checkedAt: new Date().toISOString()
+  });
+});
+
 app.get("/v1/auth/me", requireHttpAuth, (req, res) => {
   const { authUser } = req as AuthedRequest;
   res.json({
@@ -163,60 +222,147 @@ app.get("/v1/auth/me", requireHttpAuth, (req, res) => {
   } satisfies AuthMeResponse);
 });
 
-app.get("/v1/composio/catalog", requireHttpAuth, async (_req, res) => {
-  if (!composio.isConfigured()) {
-    res.json([] satisfies ComposioCatalogItem[]);
+app.get("/v1/billing/status", requireHttpAuth, (req, res) => {
+  const { authUser } = req as AuthedRequest;
+  const plan = resolveBillingPlan(authUser);
+  res.json({
+    plan,
+    checkoutConfigured: Boolean(env.stripeCheckoutUrl),
+    checkoutUrl: env.stripeCheckoutUrl
+  } satisfies BillingStatusResponse);
+});
+
+app.post("/v1/billing/checkout-link", requireHttpAuth, (req, res) => {
+  const { authUser } = req as AuthedRequest;
+  if (!env.stripeCheckoutUrl) {
+    res.status(503).json({ message: "Billing checkout is not configured yet." });
     return;
   }
-  const catalog = await composio.listCatalog();
-  res.json(
-    catalog.map((item) => ({
-      authConfigId: item.authConfigId,
-      name: item.name,
-      toolkitSlug: item.toolkitSlug,
-      toolkitName: item.toolkitName,
-      authScheme: item.authScheme,
-      isComposioManaged: item.isComposioManaged
-    } satisfies ComposioCatalogItem))
-  );
+
+  emitStructuredLog("info", {
+    event: "billing.checkout.link_generated",
+    userId: authUser.id
+  });
+
+  res.json({
+    checkoutUrl: env.stripeCheckoutUrl
+  } satisfies BillingCheckoutResponse);
+});
+
+app.post("/v1/telemetry/events", async (req, res) => {
+  const parsed = parseTelemetryEvent(req.body);
+  if (!parsed.ok) {
+    res.status(400).json({ message: parsed.message });
+    return;
+  }
+  if (!env.telemetryEnabled) {
+    res.status(202).json({ accepted: false });
+    return;
+  }
+
+  const authHeaderToken = getBearerToken(req.header("authorization"));
+  let userId: string | null = null;
+  if (authHeaderToken) {
+    try {
+      const user = await auth.verifyAccessToken(authHeaderToken);
+      userId = user.id;
+    } catch {
+      userId = null;
+    }
+  }
+
+  emitStructuredLog("info", {
+    event: "telemetry.event",
+    telemetryEvent: parsed.value.event,
+    metadata: parsed.value.metadata ?? {},
+    userId
+  });
+
+  res.status(202).json({ accepted: true });
+});
+
+app.get("/v1/composio/catalog", requireHttpAuth, async (_req, res) => {
+  try {
+    if (!composio.isConfigured()) {
+      res.json([] satisfies ComposioCatalogItem[]);
+      return;
+    }
+    const catalog = await composio.listCatalog();
+    res.json(
+      catalog.map((item) => ({
+        authConfigId: item.authConfigId,
+        name: item.name,
+        toolkitSlug: item.toolkitSlug,
+        toolkitName: item.toolkitName,
+        authScheme: item.authScheme,
+        isComposioManaged: item.isComposioManaged
+      } satisfies ComposioCatalogItem))
+    );
+  } catch (error) {
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "composio.catalog.failed",
+      correlationId,
+      error: toErrorMessage(error)
+    });
+    res.status(502).json({ message: `Could not load integration catalog. Ref: ${correlationId}` });
+  }
 });
 
 app.post("/v1/composio/connect-link", requireHttpAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const authConfigId = readRequiredString(req.body, "authConfigId");
-  if (!authConfigId) {
-    res.status(400).json({ message: "authConfigId is required." });
+  const parsedConnectBody = parseConnectLinkBody(req.body);
+  if (!parsedConnectBody.ok) {
+    res.status(400).json({ message: parsedConnectBody.message });
     return;
   }
 
   try {
-    const result = await composio.createConnectLink(authUser.composioUserId, authConfigId);
+    const result = await composio.createConnectLink(authUser.composioUserId, parsedConnectBody.value.authConfigId);
     res.json({
       redirectUrl: result.redirectUrl,
       connectionRequestId: result.connectionRequestId
     } satisfies ComposioConnectLinkResponse);
   } catch (err) {
-    res.status(500).json({ message: toErrorMessage(err) });
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "composio.connect_link.failed",
+      userId: authUser.id,
+      correlationId,
+      error: toErrorMessage(err)
+    });
+    res.status(502).json({ message: `Could not start connection flow. Ref: ${correlationId}` });
   }
 });
 
 app.get("/v1/composio/connections", requireHttpAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
-  if (!composio.isConfigured()) {
-    res.json([] satisfies ComposioConnectionItem[]);
-    return;
+  try {
+    if (!composio.isConfigured()) {
+      res.json([] satisfies ComposioConnectionItem[]);
+      return;
+    }
+    const connections = await composio.listConnections(authUser.composioUserId);
+    res.json(
+      connections.map((item) => ({
+        connectedAccountId: item.connectedAccountId,
+        authConfigId: item.authConfigId,
+        authConfigName: item.authConfigName,
+        toolkitSlug: item.toolkitSlug,
+        toolkitName: item.toolkitName,
+        status: item.status
+      } satisfies ComposioConnectionItem))
+    );
+  } catch (error) {
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "composio.connections.failed",
+      userId: authUser.id,
+      correlationId,
+      error: toErrorMessage(error)
+    });
+    res.status(502).json({ message: `Could not load connected apps. Ref: ${correlationId}` });
   }
-  const connections = await composio.listConnections(authUser.composioUserId);
-  res.json(
-    connections.map((item) => ({
-      connectedAccountId: item.connectedAccountId,
-      authConfigId: item.authConfigId,
-      authConfigName: item.authConfigName,
-      toolkitSlug: item.toolkitSlug,
-      toolkitName: item.toolkitName,
-      status: item.status
-    } satisfies ComposioConnectionItem))
-  );
 });
 
 app.get("/v1/composio/connect/callback", async (req, res) => {
@@ -235,8 +381,28 @@ app.get("/v1/composio/connect/callback", async (req, res) => {
 
 app.get("/v1/actions/history", requireHttpAuth, async (req, res) => {
   const { authUser } = req as AuthedRequest;
-  const items = await audit.listHistory(authUser.id);
-  res.json({ items } satisfies ActionHistoryResponse);
+  try {
+    const items = await audit.listHistory(authUser.id);
+    res.json({ items } satisfies ActionHistoryResponse);
+  } catch (error) {
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "audit.history.failed",
+      userId: authUser.id,
+      correlationId,
+      error: toErrorMessage(error)
+    });
+    res.status(500).json({ message: `Could not load action history. Ref: ${correlationId}` });
+  }
+});
+
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  const message = toErrorMessage(error);
+  if (message.includes("CORS origin denied")) {
+    res.status(403).json({ message: "Origin is not allowed." });
+    return;
+  }
+  next(error);
 });
 
 const httpServer = createServer(app);
@@ -272,7 +438,8 @@ namespace.on("connection", (socket) => {
     activeTtsAbortController: null,
     activeEmailWorkflowId: null,
     emailTriageCache: null,
-    emailConversation: createEmailConversationState()
+    emailConversation: createEmailConversationState(),
+    recentUtteranceAtMs: []
   };
   hydrateSessionFromLatestWorkflow(state);
   sessionStateBySocketId.set(socket.id, state);
@@ -298,25 +465,56 @@ namespace.on("connection", (socket) => {
     });
   }
 
-  socket.on(WS_EVENTS.AUDIO_USER_UTTERANCE, (payload: AudioUserUtteranceEvent) => {
-    void handleUserUtterance(socket, payload);
+  socket.on(WS_EVENTS.AUDIO_USER_UTTERANCE, (payload: unknown) => {
+    const parsed = parseAudioUserUtterance(payload);
+    if (!parsed.ok) {
+      emitError(socket, {
+        message: parsed.message,
+        code: "invalid_audio_payload",
+        retryable: true
+      });
+      return;
+    }
+    void handleUserUtterance(socket, parsed.value);
   });
 
   // Keep this event for compatibility, but the active path is utterance upload.
   socket.on(WS_EVENTS.AUDIO_USER_CHUNK, (_payload: AudioUserChunkEvent) => {
-    emitError(socket, "Streaming chunk mode is disabled. Please use utterance mode.");
+    emitError(socket, {
+      message: "Streaming chunk mode is disabled. Please use utterance mode.",
+      code: "streaming_chunks_disabled",
+      retryable: true
+    });
   });
 
   socket.on(WS_EVENTS.STT_FINAL, (payload: TranscriptEvent) => {
     void processFinalTranscript(socket, payload.text);
   });
 
-  socket.on(WS_EVENTS.ACTION_APPROVE, (payload: ActionApproveEvent) => {
-    void handleActionApprove(socket, payload);
+  socket.on(WS_EVENTS.ACTION_APPROVE, (payload: unknown) => {
+    const parsed = parseActionApprove(payload);
+    if (!parsed.ok) {
+      emitError(socket, {
+        message: parsed.message,
+        code: "invalid_action_approve_payload",
+        retryable: true
+      });
+      return;
+    }
+    void handleActionApprove(socket, parsed.value);
   });
 
-  socket.on(WS_EVENTS.ACTION_REJECT, (payload: ActionRejectEvent) => {
-    void handleActionReject(socket, payload);
+  socket.on(WS_EVENTS.ACTION_REJECT, (payload: unknown) => {
+    const parsed = parseActionReject(payload);
+    if (!parsed.ok) {
+      emitError(socket, {
+        message: parsed.message,
+        code: "invalid_action_reject_payload",
+        retryable: true
+      });
+      return;
+    }
+    void handleActionReject(socket, parsed.value);
   });
 
   socket.on(WS_EVENTS.SESSION_RESET, () => {
@@ -334,6 +532,7 @@ namespace.on("connection", (socket) => {
     state.activeEmailWorkflowId = null;
     state.emailTriageCache = null;
     state.emailConversation = createEmailConversationState();
+    state.recentUtteranceAtMs = [];
     llm.clearSession(socket.id);
     actionOrchestrator.clearSession(socket.id);
     emitSttStatus(socket, {
@@ -354,6 +553,14 @@ namespace.on("connection", (socket) => {
 
 async function handleUserUtterance(socket: Socket, payload: AudioUserUtteranceEvent): Promise<void> {
   const state = ensureSessionState(socket.id);
+  if (isSocketRateLimited(state)) {
+    emitError(socket, {
+      message: "Too many utterances in a short period. Please pause for a few seconds.",
+      code: "utterance_rate_limited",
+      retryable: true
+    });
+    return;
+  }
   if (!stt.isConfigured()) {
     emitSttStatus(socket, {
       code: "provider_error",
@@ -363,7 +570,11 @@ async function handleUserUtterance(socket: Socket, payload: AudioUserUtteranceEv
   }
 
   if (!payload.audioBase64 || payload.mimeType !== "audio/mpeg") {
-    emitError(socket, "Invalid utterance payload.");
+    emitError(socket, {
+      message: "Invalid utterance payload.",
+      code: "invalid_audio_payload",
+      retryable: true
+    });
     return;
   }
 
@@ -397,12 +608,20 @@ async function handleUserUtterance(socket: Socket, payload: AudioUserUtteranceEv
 
     await processFinalTranscript(socket, transcript);
   } catch (err) {
-    console.error("[voice][stt] utterance processing failed", {
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "voice.stt.failed",
       sessionId: socket.id,
       userId: state.user.id,
+      correlationId,
       error: toErrorMessage(err)
     });
-    emitError(socket, `Speech transcription failed: ${toErrorMessage(err)}`);
+    emitError(socket, {
+      message: `Speech transcription failed. Ref: ${correlationId}`,
+      code: "stt_failed",
+      retryable: true,
+      correlationId
+    });
     emitSttStatus(socket, {
       code: "provider_error",
       message: "Speech transcription failed."
@@ -450,13 +669,21 @@ async function processFinalTranscript(socket: Socket, rawText: string): Promise<
     try {
       triageReply = await handleEmailIntent(socket, state, emailIntent);
     } catch (err) {
-      console.error("[voice][gmail] triage flow failed", {
+      const correlationId = randomUUID();
+      emitStructuredLog("error", {
+        event: "voice.gmail.triage_failed",
         sessionId: socket.id,
         userId: state.user.id,
+        correlationId,
         input: text,
         error: toErrorMessage(err)
       });
-      emitError(socket, `Gmail triage failed: ${toErrorMessage(err)}`);
+      emitError(socket, {
+        message: `Inbox triage is temporarily unavailable. Ref: ${correlationId}`,
+        code: "gmail_triage_failed",
+        retryable: true,
+        correlationId
+      });
       triageReply = "I could not process your inbox right now. Please retry in a few seconds.";
     }
     emitAgentReplyPartial(socket, triageReply);
@@ -472,12 +699,20 @@ async function processFinalTranscript(socket: Socket, rawText: string): Promise<
         composio.listToolsByUser(state.user.composioUserId)
       );
     } catch (toolCatalogError) {
-      console.error("[voice][tools] failed to list tools", {
+      const correlationId = randomUUID();
+      emitStructuredLog("warn", {
+        event: "voice.tools.catalog_failed",
         sessionId: socket.id,
         userId: state.user.id,
+        correlationId,
         error: toErrorMessage(toolCatalogError)
       });
-      emitError(socket, `Tool catalog unavailable: ${toErrorMessage(toolCatalogError)}`);
+      emitError(socket, {
+        message: `Connected tools are temporarily unavailable. Ref: ${correlationId}`,
+        code: "tool_catalog_unavailable",
+        retryable: true,
+        correlationId
+      });
       toolsByName = {};
     }
     const availableTools = Object.values(toolsByName).map((tool) => ({
@@ -534,19 +769,28 @@ async function processFinalTranscript(socket: Socket, rawText: string): Promise<
       }
     }
   } catch (err) {
-    console.error("[voice][agent] llm/action loop failed", {
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "voice.agent.loop_failed",
       sessionId: socket.id,
       userId: state.user.id,
+      correlationId,
       input: text,
       error: toErrorMessage(err)
     });
-    emitError(socket, `LLM/action loop failed: ${toErrorMessage(err)}`);
+    emitError(socket, {
+      message: `Assistant generation failed. Ref: ${correlationId}`,
+      code: "assistant_generation_failed",
+      retryable: true,
+      correlationId
+    });
     try {
       finalReply = await llm.generateReply(socket.id, text, (partialText) => {
         socket.emit(WS_EVENTS.AGENT_REPLY_PARTIAL, { text: partialText } satisfies AgentReplyEvent);
       });
     } catch (fallbackError) {
-      console.error("[voice][agent] fallback reply failed", {
+      emitStructuredLog("error", {
+        event: "voice.agent.fallback_failed",
         sessionId: socket.id,
         userId: state.user.id,
         error: toErrorMessage(fallbackError)
@@ -598,7 +842,8 @@ async function handleEmailIntent(socket: Socket, state: SessionState, intent: Em
   });
   applyWorkflowSnapshotToSessionState(state, workflow);
 
-  console.info("[voice][gmail] triage completed", {
+  emitStructuredLog("info", {
+    event: "voice.gmail.triage_completed",
     sessionId: socket.id,
     userId: state.user.id,
     workflowId: workflow.workflowId,
@@ -619,7 +864,8 @@ async function handleEmailIntent(socket: Socket, state: SessionState, intent: Em
   });
 
   if (triage.capHit) {
-    console.warn("[voice][gmail] soft coverage cap reached", {
+    emitStructuredLog("warn", {
+      event: "voice.gmail.soft_cap_hit",
       sessionId: socket.id,
       userId: state.user.id,
       scannedCount: triage.scannedCount,
@@ -1199,11 +1445,19 @@ async function emitAgentFinalAndSpeak(socket: Socket, finalReply: string): Promi
     if (isAbortError(err)) {
       return;
     }
-    console.error("[voice][tts] synthesis failed", {
+    const correlationId = randomUUID();
+    emitStructuredLog("error", {
+      event: "voice.tts.failed",
       sessionId: socket.id,
+      correlationId,
       error: toErrorMessage(err)
     });
-    emitError(socket, `TTS failed: ${toErrorMessage(err)}`);
+    emitError(socket, {
+      message: `Speech synthesis failed. Ref: ${correlationId}`,
+      code: "tts_failed",
+      retryable: true,
+      correlationId
+    });
   } finally {
     if (state.activeTtsAbortController === abortController) {
       state.activeTtsAbortController = null;
@@ -1236,7 +1490,8 @@ function ensureSessionState(socketId: string): SessionState {
     activeTtsAbortController: null,
     activeEmailWorkflowId: null,
     emailTriageCache: null,
-    emailConversation: createEmailConversationState()
+    emailConversation: createEmailConversationState(),
+    recentUtteranceAtMs: []
   };
   sessionStateBySocketId.set(socketId, created);
   return created;
@@ -1246,8 +1501,17 @@ function emitSttStatus(socket: Socket, payload: SttStatusEvent): void {
   socket.emit(WS_EVENTS.STT_STATUS, payload);
 }
 
-function emitError(socket: Socket, message: string): void {
-  socket.emit(WS_EVENTS.ERROR_RAISED, { message } satisfies ErrorRaisedEvent);
+function emitError(
+  socket: Socket,
+  payload: string | { message: string; code?: string; retryable?: boolean; correlationId?: string }
+): void {
+  const normalized: ErrorRaisedEvent =
+    typeof payload === "string"
+      ? {
+          message: payload
+        }
+      : payload;
+  socket.emit(WS_EVENTS.ERROR_RAISED, normalized);
 }
 
 function emitActionProposed(socket: Socket, payload: ActionProposedEvent): void {
@@ -1611,12 +1875,171 @@ function summarizeResult(result: unknown): string {
   return `Execution completed with result: ${String(result)}`;
 }
 
-function readRequiredString(value: unknown, key: string): string | null {
-  if (!value || typeof value !== "object") {
-    return null;
+function parseConnectLinkBody(value: unknown): { ok: true; value: { authConfigId: string } } | { ok: false; message: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "Body must be a JSON object." };
   }
-  const raw = (value as Record<string, unknown>)[key];
-  return typeof raw === "string" && raw.trim().length > 0 ? raw.trim() : null;
+  const authConfigId = String((value as Record<string, unknown>).authConfigId ?? "").trim();
+  if (!authConfigId) {
+    return { ok: false, message: "authConfigId is required." };
+  }
+  if (authConfigId.length > MAX_AUTH_CONFIG_ID_LENGTH) {
+    return { ok: false, message: "authConfigId is too long." };
+  }
+  return {
+    ok: true,
+    value: {
+      authConfigId
+    }
+  };
+}
+
+function parseTelemetryEvent(value: unknown): { ok: true; value: TelemetryEventRequest } | { ok: false; message: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "Body must be a JSON object." };
+  }
+  const event = String((value as Record<string, unknown>).event ?? "").trim() as TelemetryEventName;
+  if (!TELEMETRY_EVENTS.has(event)) {
+    return { ok: false, message: "Unsupported telemetry event." };
+  }
+  const metadataRaw = (value as Record<string, unknown>).metadata;
+  const metadata = isPlainObject(metadataRaw) ? metadataRaw : undefined;
+
+  return {
+    ok: true,
+    value: {
+      event,
+      metadata
+    }
+  };
+}
+
+function parseAudioUserUtterance(
+  value: unknown
+): { ok: true; value: AudioUserUtteranceEvent } | { ok: false; message: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "Utterance payload must be an object." };
+  }
+  const payload = value as Record<string, unknown>;
+  const audioBase64 = typeof payload.audioBase64 === "string" ? payload.audioBase64.trim() : "";
+  const mimeType = typeof payload.mimeType === "string" ? payload.mimeType : "";
+  const sampleRate = Number(payload.sampleRate);
+
+  if (!audioBase64) {
+    return { ok: false, message: "audioBase64 is required." };
+  }
+  if (!/^[A-Za-z0-9+/=]+$/.test(audioBase64)) {
+    return { ok: false, message: "audioBase64 must be valid base64 content." };
+  }
+  if (mimeType !== "audio/mpeg") {
+    return { ok: false, message: "mimeType must be audio/mpeg." };
+  }
+  if (sampleRate !== 16000) {
+    return { ok: false, message: "sampleRate must be 16000." };
+  }
+  if (audioBase64.length > 10_000_000) {
+    return { ok: false, message: "audio payload is too large." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      audioBase64,
+      mimeType,
+      sampleRate: 16000
+    }
+  };
+}
+
+function parseActionApprove(value: unknown): { ok: true; value: ActionApproveEvent } | { ok: false; message: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "Approve payload must be an object." };
+  }
+  const payload = value as Record<string, unknown>;
+  const actionId = typeof payload.actionId === "string" ? payload.actionId.trim() : "";
+  const revisionId = typeof payload.revisionId === "string" ? payload.revisionId.trim() : "";
+  const source = payload.source === "voice" || payload.source === "ui" ? payload.source : "ui";
+
+  if (!actionId || !revisionId) {
+    return { ok: false, message: "actionId and revisionId are required." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      actionId,
+      revisionId,
+      source
+    }
+  };
+}
+
+function parseActionReject(value: unknown): { ok: true; value: ActionRejectEvent } | { ok: false; message: string } {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return { ok: false, message: "Reject payload must be an object." };
+  }
+  const payload = value as Record<string, unknown>;
+  const actionId = typeof payload.actionId === "string" ? payload.actionId.trim() : "";
+  const revisionId = typeof payload.revisionId === "string" ? payload.revisionId.trim() : "";
+  const source = payload.source === "voice" || payload.source === "ui" ? payload.source : "ui";
+  const reason =
+    typeof payload.reason === "string"
+      ? payload.reason.trim().slice(0, MAX_REASON_LENGTH)
+      : undefined;
+
+  if (!actionId || !revisionId) {
+    return { ok: false, message: "actionId and revisionId are required." };
+  }
+
+  return {
+    ok: true,
+    value: {
+      actionId,
+      revisionId,
+      source,
+      reason
+    }
+  };
+}
+
+function isSocketRateLimited(state: SessionState): boolean {
+  const now = Date.now();
+  const threshold = now - 60_000;
+  state.recentUtteranceAtMs = state.recentUtteranceAtMs.filter((timestamp) => timestamp >= threshold);
+  if (state.recentUtteranceAtMs.length >= env.socketUtteranceRateLimitPerMinute) {
+    return true;
+  }
+  state.recentUtteranceAtMs.push(now);
+  return false;
+}
+
+function resolveBillingPlan(user: AuthenticatedUser): typeof BILLING_PAID | typeof BILLING_TRIAL {
+  const email = user.email?.trim().toLowerCase() ?? "";
+  if (email && env.paidUserEmails.includes(email)) {
+    return BILLING_PAID;
+  }
+  return BILLING_TRIAL;
+}
+
+function emitStructuredLog(level: "info" | "warn" | "error", payload: Record<string, unknown>): void {
+  const formatted = JSON.stringify({
+    ts: new Date().toISOString(),
+    level,
+    ...payload
+  });
+  if (level === "error") {
+    console.error(formatted);
+    return;
+  }
+  if (level === "warn") {
+    console.warn(formatted);
+    return;
+  }
+  console.log(formatted);
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 function pickConnectionId(query: Request["query"]): string | null {
@@ -1683,5 +2106,8 @@ async function requireHttpAuth(req: Request, res: Response, next: NextFunction):
 }
 
 httpServer.listen(env.port, () => {
-  console.log(`server listening on http://localhost:${env.port}`);
+  emitStructuredLog("info", {
+    event: "server.started",
+    port: env.port
+  });
 });

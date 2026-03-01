@@ -19,9 +19,11 @@ export function ActionNotificationLane({
   onViewAll
 }: ActionNotificationLaneProps) {
   const hasNotifications = notifications.length > 0;
+  const hasOnlyPlaceholders = hasNotifications && notifications.every(isPlaceholderNotification);
+  const laneClassName = `task-lane ${hasNotifications ? "" : "is-empty-lane"} ${hasOnlyPlaceholders ? "is-placeholder-lane" : ""}`.trim();
 
   return (
-    <aside className={`task-lane ${hasNotifications ? "" : "is-empty-lane"}`} aria-label="Task notifications">
+    <aside className={laneClassName} aria-label="Task notifications">
       <header className="task-lane-head">
         <h2>Recent Activity</h2>
         <button type="button" className="task-lane-view-all" onClick={onViewAll}>
@@ -37,6 +39,7 @@ export function ActionNotificationLane({
       ) : null}
 
       {notifications.map((notification) => {
+        const isPlaceholder = isPlaceholderNotification(notification);
         const showApprovalControls =
           !!pendingAction &&
           notification.actionId === pendingAction.actionId &&
@@ -47,6 +50,7 @@ export function ActionNotificationLane({
           <ActionNotificationCard
             key={notification.id}
             notification={notification}
+            isPlaceholder={isPlaceholder}
             showApprovalControls={showApprovalControls}
             onApprovePending={onApprovePending}
             onRejectPending={onRejectPending}
@@ -55,4 +59,8 @@ export function ActionNotificationLane({
       })}
     </aside>
   );
+}
+
+function isPlaceholderNotification(notification: TaskNotification): boolean {
+  return notification.type.startsWith("placeholder.");
 }
