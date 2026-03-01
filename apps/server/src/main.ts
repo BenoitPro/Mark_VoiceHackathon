@@ -53,6 +53,7 @@ import { GmailInboxTriageService, type TriagedEmail } from "./gmailInboxTriage.j
 import { GmailPriorityLlmClassifier } from "./gmailPriorityLlm.js";
 import { SpeechmaticsAdapter } from "./speechmatics.js";
 import { SpeechmaticsTtsService } from "./speechmaticsTts.js";
+import { TimedSessionCache } from "./toolCatalogCache.js";
 import { TtsRouter } from "./ttsRouter.js";
 
 type EmailTriageCache = {
@@ -108,6 +109,7 @@ const emailIntentRouter = new EmailIntentRouter();
 const gmailPriorityClassifier = new GmailPriorityLlmClassifier(env);
 const gmailInboxTriage = new GmailInboxTriageService(composio, gmailPriorityClassifier);
 const emailWorkflowStore = new EmailWorkflowStore();
+const toolsBySessionCache = new TimedSessionCache<Awaited<ReturnType<typeof composio.listToolsByUser>>>(60_000);
 
 const EMAIL_REPLY_DRAFT_MAX_CHARS = 1_400;
 
@@ -343,6 +345,7 @@ namespace.on("connection", (socket) => {
   socket.on("disconnect", () => {
     const state = sessionStateBySocketId.get(socket.id);
     state?.activeTtsAbortController?.abort("socket-disconnect");
+    toolsBySessionCache.clear(socket.id);
     sessionStateBySocketId.delete(socket.id);
     actionOrchestrator.clearSession(socket.id);
     llm.clearSession(socket.id);
@@ -465,7 +468,9 @@ async function processFinalTranscript(socket: Socket, rawText: string): Promise<
   try {
     let toolsByName: Record<string, Awaited<ReturnType<typeof composio.listToolsByUser>>[string]> = {};
     try {
-      toolsByName = await composio.listToolsByUser(state.user.composioUserId);
+      toolsByName = await toolsBySessionCache.get(socket.id, async () =>
+        composio.listToolsByUser(state.user.composioUserId)
+      );
     } catch (toolCatalogError) {
       console.error("[voice][tools] failed to list tools", {
         sessionId: socket.id,

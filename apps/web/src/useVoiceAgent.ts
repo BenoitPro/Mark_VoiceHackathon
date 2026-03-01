@@ -86,7 +86,7 @@ type VoiceAgentApi = VoiceAgentState & {
 const SILENCE_THRESHOLD = 0.015;
 const INTERRUPT_THRESHOLD = 0.05;
 const INTERRUPT_HOLD_MS = 350;
-const SILENCE_COMMIT_MS = 900;
+const SILENCE_COMMIT_MS = 700;
 const SAMPLE_RATE: 16000 = 16000;
 const PRE_ROLL_CHUNKS = 4;
 
