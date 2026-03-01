@@ -1,8 +1,0 @@
-{
-  email admin@example.com
-}
-
-mark.local {
-  encode zstd gzip
-  reverse_proxy api:4000
-}
